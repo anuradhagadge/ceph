@@ -3909,46 +3909,6 @@ Then run the following:
                 if stray['type'] == 'osd':
                     result.append(str(stray['id']))
             return result
-        def prepare_DriveGroupSpec(specs: dict[str, Any], host_name: str, osd_id: str) -> DriveGroupSpec:
-            list_drive_group_spec_bool_arg: List[str] = []
-            drive_group_spec = {
-                'data_devices': []
-            }  # type: Dict
-            spec = specs.get(osd_id)
-            if spec is not None:
-                if '=' in v:
-                    drv_grp_spec_arg, value = v.split('=')
-                    if drv_grp_spec_arg in ['data_devices',
-                                            'db_devices',
-                                            'wal_devices',
-                                            'journal_devices']:
-                        drive_group_spec[drv_grp_spec_arg] = []
-                        drive_group_spec[drv_grp_spec_arg].append(value)
-                    else:
-                        if value.lower() in ['true', 'false']:
-                            list_drive_group_spec_bool_arg.append(drv_grp_spec_arg)
-                            drive_group_spec[drv_grp_spec_arg] = value.lower() == "true"
-                        else:
-                            drive_group_spec[drv_grp_spec_arg] = value
-                elif drv_grp_spec_arg is not None:
-                    drive_group_spec[drv_grp_spec_arg].append(v)
-                else:
-                    drive_group_spec['data_devices'].append(v)
-                values.remove(v)
-
-            for dev_type in ['data_devices', 'db_devices', 'wal_devices', 'journal_devices']:
-                drive_group_spec[dev_type] = DeviceSelection(
-                    paths=drive_group_spec[dev_type]) if drive_group_spec.get(dev_type) else None
-
-            drive_group = DriveGroupSpec(
-                placement=PlacementSpec(host_pattern=host_name),
-                method=method,
-                **drive_group_spec,
-            )
-
-            return drive_group_spec
-
-        out: str = ''
         out: str = ''
         ret, out, err = self.check_mon_command({
                         'prefix': 'osd tree',
@@ -3962,8 +3922,10 @@ Then run the following:
             if not hostname:
                 raise OrchestratorError(f'Unexpected error: cannot retrieve corresponding host for osd.{osd_id}')
             self.ceph_volume.lvm_list.get_data(hostname)
-            dg = prepare_DriveGroupSpec(specs=self.ceph_volume.lvm_list.data, host_name=hostname, osd_id=osd_id)
-            self.create_osds(drive_group=dg)
+            _osd_id_details = self.ceph_volume.lvm_list.data.get(osd_id)
+            if len(_osd_id_details) == 1:
+                devices = ",".join(d for d in _osd_id_details[0].get("devices", []))
+                out = f"{hostname}:{devices}"
         return out
 
     def trigger_connect_dashboard_rgw(self) -> None:

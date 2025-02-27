@@ -1317,7 +1317,7 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         """
 
         if inbuf and all_available_devices:
-            return HandleCommandResult(-errno.EINVAL, stderr='-i infile and --all-available-devices are mutually exclusive')
+            return HandleCommandResult(-errerrnono.EINVAL, stderr='-i infile and --all-available-devices are mutually exclusive')
 
         if not inbuf and not all_available_devices:
             # one parameter must be present
@@ -1360,19 +1360,10 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
 
         return HandleCommandResult(-errno.EINVAL, stderr='--all-available-devices is required')
 
-    @_cli_write_command('orch daemon add osd')
-    def _daemon_add_osd(self,
+    def __daemon_add_osd(self,
                         svc_arg: Optional[str] = None,
                         method: Optional[OSDMethod] = None) -> HandleCommandResult:
-        """Create OSD daemon(s) on specified host and device(s) (e.g., ceph orch daemon add osd myhost:/dev/sdb)"""
-        # Create one or more OSDs"""
 
-        usage = """
-Usage:
-  ceph orch daemon add osd host:device1,device2,...
-  ceph orch daemon add osd host:data_devices=device1,device2,db_devices=device3,osds_per_device=2[,encrypted=false]
-  ceph orch daemon add osd host:data_devices=device1[,encrypted=true,tpm2=true]
-"""
         if not svc_arg:
             return HandleCommandResult(-errno.EINVAL, stderr=usage)
         try:
@@ -1422,13 +1413,30 @@ Usage:
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
+    @_cli_write_command('orch daemon add osd')
+    def _daemon_add_osd(self,
+                        svc_arg: Optional[str] = None,
+                        method: Optional[OSDMethod] = None) -> HandleCommandResult:
+        """Create OSD daemon(s) on specified host and device(s) (e.g., ceph orch daemon add osd myhost:/dev/sdb)"""
+        # Create one or more OSDs"""
+
+        usage = """
+Usage:
+  ceph orch daemon add osd host:device1,device2,...
+  ceph orch daemon add osd host:data_devices=device1,device2,db_devices=device3,osds_per_device=2[,encrypted=false]
+  ceph orch daemon add osd host:data_devices=device1[,encrypted=true,tpm2=true]
+"""
+        return self.__daemon_add_osd(svc_arg, method) 
+
     @_cli_write_command('orch osd rebuild')
     def _osd_rebuild(self,
                      osd_ids: List[str]) -> HandleCommandResult:
-        self.remove_osds(osd_ids, zap=True, replace=True, no_destroy=False)
+        self.remove_osds(osd_ids, zap=True, replace=True, no_destroy=True)
         completion = self.osd_rebuild(osd_ids)
         raise_if_exception(completion)
-        return HandleCommandResult(stdout=completion.result_str())
+        out = completion.result_str()
+        self.__daemon_add_osd(out)
+        return HandleCommandResult(stdout=out)
 
     @_cli_write_command('orch osd rm')
     def _osd_rm_start(self,
