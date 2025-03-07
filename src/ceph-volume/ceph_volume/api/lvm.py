@@ -1016,8 +1016,9 @@ def create_lv(name_prefix: str,
             '100%FREE',
             '-n', name, vg.vg_name
         ]
-    process.run(command, run_on_host=True)
 
+    logger.info("**** ALG *** Volume.create_lv command : {}".format(command))
+    process.run(command, run_on_host=True)
     lv = get_single_lv(filters={'lv_name': name, 'vg_name': vg.vg_name})
 
     if tags is None:

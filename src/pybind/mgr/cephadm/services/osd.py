@@ -60,6 +60,9 @@ class OSDService(CephService):
             logger.debug('Applying service osd.%s on host %s...' % (
                 drive_group.service_id, host
             ))
+            logger.info('**** ALG **** Applying service osd.%s on host %s...' % (
+                drive_group.service_id, host
+            ))
             start_ts = datetime_now()
             env_vars: List[str] = [f"CEPH_VOLUME_OSDSPEC_AFFINITY={drive_group.service_id}"]
             ret_msg = await self.create_single_host(

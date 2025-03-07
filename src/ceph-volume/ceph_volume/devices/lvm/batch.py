@@ -380,6 +380,7 @@ class Batch(object):
             'no_systemd',
         ]
         defaults.update({arg: getattr(self.args, arg) for arg in global_args})
+        logger.info("** ALG ** Batch._execute plan: {}".format(plan))
         for osd in plan:
             args = osd.get_args(defaults)
             if self.args.prepare:

@@ -1433,11 +1433,11 @@ Usage:
     def _osd_rebuild(self,
                      osd_ids: List[str]) -> HandleCommandResult:
         self.remove_osds(osd_ids, zap=True, replace=True, no_destroy=True)
-        completion = self.osd_rebuild(osd_ids)
+        completion, details = self.osd_rebuild(osd_ids)
         raise_if_exception(completion)
         out = completion.result_str()
         self.__daemon_add_osd(out)
-        return HandleCommandResult(stdout=out)
+        return HandleCommandResult(stdout=details)
 
     @_cli_write_command('orch osd rm')
     def _osd_rm_start(self,

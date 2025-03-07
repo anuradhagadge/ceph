@@ -3961,6 +3961,7 @@ Then run the following:
                         'format': 'json'
         })
         osd_tree: Dict[str, Any] = json.loads(out)
+        _osd_id_details = ""
         for osd_id in osd_ids:
             if osd_id in get_stray():
                 raise OrchestratorError(f'osd.{osd_id} is a stray daemon. Cannot get corresponding host.')
@@ -3972,7 +3973,7 @@ Then run the following:
             if len(_osd_id_details) == 1:
                 devices = ",".join(d for d in _osd_id_details[0].get("devices", []))
                 out = f"{hostname}:{devices}"
-        return out
+        return out, _osd_id_details
 
     def trigger_connect_dashboard_rgw(self) -> None:
         self.need_connect_dashboard_rgw = True
