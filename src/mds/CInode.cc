@@ -40,6 +40,7 @@
 
 #include "common/config.h"
 #include "global/global_context.h"
+#include "include/denc.h"
 #include "include/ceph_assert.h"
 
 #include "mds/MDSContinuation.h"
@@ -313,6 +314,9 @@ ostream& operator<<(ostream& out, const CInode& in)
   }
   if (in.get_inode()->get_quiesce_block()) {
     out << " qblock";
+  }
+  if (in.get_inode()->optmetadata.size() > 0) {
+    out << " " << in.get_inode()->optmetadata;
   }
 
   out << " " << &in;
@@ -1259,7 +1263,7 @@ struct C_IO_Inode_Fetched : public CInodeIOContext {
   Context *fin;
   C_IO_Inode_Fetched(CInode *i, Context *f) : CInodeIOContext(i), fin(f) {}
   void finish(int r) override {
-    // Ignore 'r', because we fetch from two places, so r is usually CEPHFS_ENOENT
+    // Ignore 'r', because we fetch from two places, so r is usually ENOENT
     in->_fetched(bl, bl2, fin);
   }
   void print(ostream& out) const override {
@@ -1299,7 +1303,7 @@ void CInode::_fetched(bufferlist& bl, bufferlist& bl2, Context *fin)
     p = bl.cbegin();
   } else {
     derr << "No data while reading inode " << ino() << dendl;
-    fin->complete(-CEPHFS_ENOENT);
+    fin->complete(-ENOENT);
     return;
   }
 
@@ -1313,7 +1317,7 @@ void CInode::_fetched(bufferlist& bl, bufferlist& bl2, Context *fin)
     if (magic != CEPH_FS_ONDISK_MAGIC) {
       dout(0) << "on disk magic '" << magic << "' != my magic '" << CEPH_FS_ONDISK_MAGIC
               << "'" << dendl;
-      fin->complete(-CEPHFS_EINVAL);
+      fin->complete(-EINVAL);
     } else {
       decode_store(p);
       dout(10) << "_fetched " << *this << dendl;
@@ -1321,7 +1325,7 @@ void CInode::_fetched(bufferlist& bl, bufferlist& bl2, Context *fin)
     }
   } catch (buffer::error &err) {
     derr << "Corrupt inode " << ino() << ": " << err.what() << dendl;
-    fin->complete(-CEPHFS_EINVAL);
+    fin->complete(-EINVAL);
     return;
   }
 }
@@ -1454,18 +1458,18 @@ void CInode::store_backtrace(CInodeCommitOperations &op, int op_prio,
 
 void CInode::_stored_backtrace(int r, version_t v, Context *fin)
 {
-  if (r == -CEPHFS_ENOENT) {
+  if (r == -ENOENT) {
     const int64_t pool = get_backtrace_pool();
     bool exists = mdcache->mds->objecter->with_osdmap(
         [pool](const OSDMap &osd_map) {
           return osd_map.have_pg_pool(pool);
         });
 
-    // This CEPHFS_ENOENT is because the pool doesn't exist (the user deleted it
+    // This ENOENT is because the pool doesn't exist (the user deleted it
     // out from under us), so the backtrace can never be written, so pretend
     // to succeed so that the user can proceed to e.g. delete the file.
     if (!exists) {
-      dout(4) << __func__ << " got CEPHFS_ENOENT: a data pool was deleted "
+      dout(4) << __func__ << " got ENOENT: a data pool was deleted "
                  "beneath us!" << dendl;
       r = 0;
     }
@@ -1537,7 +1541,7 @@ void CInode::verify_diri_backtrace(bufferlist &bl, int err)
     if (backtrace.ancestors.empty() ||
 	backtrace.ancestors[0].dname != pdn->get_name() ||
 	backtrace.ancestors[0].dirino != pdn->get_dir()->ino())
-      err = -CEPHFS_EINVAL;
+      err = -EINVAL;
   }
 
   if (err) {
@@ -2160,7 +2164,7 @@ void CInode::decode_lock_iflock(bufferlist::const_iterator& p)
 
 void CInode::encode_lock_ipolicy(bufferlist& bl)
 {
-  ENCODE_START(3, 1, bl);
+  ENCODE_START(4, 1, bl);
   if (is_dir()) {
     encode(get_inode()->version, bl);
     encode(get_inode()->ctime, bl);
@@ -2169,8 +2173,10 @@ void CInode::encode_lock_ipolicy(bufferlist& bl)
     encode(get_inode()->export_pin, bl);
     encode(get_inode()->flags, bl);
     encode(get_inode()->export_ephemeral_random_pin, bl);
+    encode(get_inode()->optmetadata, bl);
   } else {
     encode(get_inode()->flags, bl);
+    encode(get_inode()->optmetadata, bl);
   }
   ENCODE_FINISH(bl);
 }
@@ -2179,7 +2185,7 @@ void CInode::decode_lock_ipolicy(bufferlist::const_iterator& p)
 {
   ceph_assert(!is_auth());
   auto _inode = allocate_inode(*get_inode());
-  DECODE_START(3, p);
+  DECODE_START(4, p);
   if (is_dir()) {
     decode(_inode->version, p);
     utime_t tm;
@@ -2193,9 +2199,15 @@ void CInode::decode_lock_ipolicy(bufferlist::const_iterator& p)
       decode(_inode->flags, p);
       decode(_inode->export_ephemeral_random_pin, p);
     }
+    if (struct_v >= 4) {
+      decode(_inode->optmetadata, p);
+    }
   } else {
     if (struct_v >= 3) {
       decode(_inode->flags, p);
+    }
+    if (struct_v >= 4) {
+      decode(_inode->optmetadata, p);
     }
   }
   DECODE_FINISH(p);
@@ -3944,7 +3956,24 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
   } else {
     xattr_version = 0;
   }
-  
+
+  bufferlist optmdbl;
+  {
+    decltype(InodeStat::optmetadata) optmetadata;
+    using kind_t = decltype(optmetadata)::optkind_t;
+
+    auto* csp = get_charmap();
+    if (csp) {
+      dout(25) << *csp << dendl;
+      auto& opt = optmetadata.get_or_create_opt(kind_t::CHARMAP);
+      auto& cs = opt.template get_meta< charmap_md_t >();
+      cs = *csp;
+      dout(25) << "cs now " << cs << dendl;
+    }
+
+    encode(optmetadata, optmdbl);
+  }
+
   // do we have room?
   if (max_bytes) {
     unsigned bytes =
@@ -3955,7 +3984,11 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
       8 + 8 + 8 + 8 + 8 + sizeof(struct ceph_timespec) + // dirstat.nfiles ~ rstat.rctime
       sizeof(__u32) + sizeof(__u32) * 2 * dirfragtree._splits.size() + // dirfragtree
       sizeof(__u32) + symlink.length() + // symlink
-      sizeof(struct ceph_dir_layout); // dir_layout
+      sizeof(struct ceph_dir_layout) // dir_layout
+      + 4 + file_i->fscrypt_auth.size() // len + data
+      + 4 + file_i->fscrypt_file.size() // len + data
+      + optmdbl.length()
+      ;
 
     if (xattr_version) {
       bytes += sizeof(__u32) + sizeof(__u32); // xattr buffer len + number entries
@@ -3973,7 +4006,7 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
       sizeof(struct ceph_timespec) + 8; // btime + change_attr
 
     if (bytes > max_bytes)
-      return -CEPHFS_ENOSPC;
+      return -ENOSPC;
   }
 
 
@@ -4109,36 +4142,40 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
    * note: encoding matches MClientReply::InodeStat
    */
   if (session->info.has_feature(CEPHFS_FEATURE_REPLY_ENCODING)) {
-    ENCODE_START(7, 1, bl);
-    encode(oi->ino, bl);
-    encode(snapid, bl);
-    encode(oi->rdev, bl);
-    encode(version, bl);
-    encode(xattr_version, bl);
+    ENCODE_START(8, 1, bl);
+    encode(std::tuple{
+      oi->ino,
+      snapid,
+      oi->rdev,
+      version,
+      xattr_version,
+    }, bl, 0);
     encode(ecap, bl);
     {
       ceph_file_layout legacy_layout;
       layout.to_legacy(&legacy_layout);
       encode(legacy_layout, bl);
     }
-    encode(any_i->ctime, bl);
-    encode(file_i->mtime, bl);
-    encode(file_i->atime, bl);
-    encode(file_i->time_warp_seq, bl);
-    encode(file_i->size, bl);
-    encode(max_size, bl);
-    encode(file_i->truncate_size, bl);
-    encode(file_i->truncate_seq, bl);
-    encode(auth_i->mode, bl);
-    encode((uint32_t)auth_i->uid, bl);
-    encode((uint32_t)auth_i->gid, bl);
-    encode(link_i->nlink, bl);
-    encode(file_i->dirstat.nfiles, bl);
-    encode(file_i->dirstat.nsubdirs, bl);
-    encode(file_i->rstat.rbytes, bl);
-    encode(file_i->rstat.rfiles, bl);
-    encode(file_i->rstat.rsubdirs, bl);
-    encode(file_i->rstat.rctime, bl);
+    encode(std::tuple{
+      any_i->ctime,
+      file_i->mtime,
+      file_i->atime,
+      file_i->time_warp_seq,
+      file_i->size,
+      max_size,
+      file_i->truncate_size,
+      file_i->truncate_seq,
+      auth_i->mode,
+      (uint32_t)auth_i->uid,
+      (uint32_t)auth_i->gid,
+      link_i->nlink,
+      file_i->dirstat.nfiles,
+      file_i->dirstat.nsubdirs,
+      file_i->rstat.rbytes,
+      file_i->rstat.rfiles,
+      file_i->rstat.rsubdirs,
+      file_i->rstat.rctime,
+    }, bl, 0);
     dirfragtree.encode(bl);
     encode(symlink, bl);
     encode(file_i->dir_layout, bl);
@@ -4157,6 +4194,8 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
     encode(!file_i->fscrypt_auth.empty(), bl);
     encode(file_i->fscrypt_auth, bl);
     encode(file_i->fscrypt_file, bl);
+    encode_nohead(optmdbl, bl);
+    // encode inodestat
     ENCODE_FINISH(bl);
   }
   else {
@@ -4999,9 +5038,15 @@ next:
       // check each dirfrag...
       for (const auto &p : in->dirfrags) {
 	CDir *dir = p.second;
-	ceph_assert(dir->get_version() > 0);
-	nest_info.add(dir->get_fnode()->accounted_rstat);
-	dir_info.add(dir->get_fnode()->accounted_fragstat);
+        /* If the dirfrag is damaged, we can not do any checks on the fragment. */
+        if (in->mdcache->mds->damage_table.is_dirfrag_damaged(dir)) {
+          results->raw_stats.error_str << "one or more dirfrags are damaged";
+          goto next;
+        } else {
+	  ceph_assert(dir->get_version() > 0);
+	  nest_info.add(dir->get_fnode()->accounted_rstat);
+	  dir_info.add(dir->get_fnode()->accounted_fragstat);
+        }
       }
       nest_info.rsubdirs++; // it gets one to account for self
       if (const sr_t *srnode = in->get_projected_srnode(); srnode)
@@ -5015,9 +5060,6 @@ next:
 	    << "freshly-calculated rstats don't match existing ones (will be fixed)";
 	  in->mdcache->repair_inode_stats(in);
           results->raw_stats.repaired = true;
-          for (const auto &p : in->dirfrags){
-            in->mdcache->mds->damage_table.remove_dirfrag_damage_entry(p.second);
-          }
 	} else {
 	  results->raw_stats.error_str
 	    << "freshly-calculated rstats don't match existing ones";
@@ -5528,6 +5570,16 @@ void CInode::set_export_pin(mds_rank_t rank)
   ceph_assert(is_dir());
   _get_projected_inode()->export_pin = rank;
   maybe_export_pin(true);
+}
+
+charmap_md_t<mempool::mds_co::pool_allocator> const* CInode::get_charmap() const
+{
+  dout(25) << __func__ << ": " << *this << dendl;
+  auto const& pi = get_projected_inode();
+  if (pi->has_charmap()) {
+    return &pi->get_charmap();
+  }
+  return nullptr;
 }
 
 mds_rank_t CInode::get_export_pin(bool inherit) const

@@ -16,6 +16,7 @@
 #define CEPH_MDSMAP_H
 
 #include <algorithm>
+#include <bitset>
 #include <map>
 #include <set>
 #include <string>
@@ -31,12 +32,12 @@
 #include "include/common_fwd.h"
 
 #include "common/Clock.h"
-#include "common/Formatter.h"
 #include "common/ceph_releases.h"
 #include "common/config.h"
 
 #include "mds/mdstypes.h"
-#include "mds/cephfs_features.h"
+
+namespace ceph { class Formatter; }
 
 static inline const auto MDS_FEATURE_INCOMPAT_BASE = CompatSet::Feature(1, "base v0.20");
 static inline const auto MDS_FEATURE_INCOMPAT_CLIENTRANGES = CompatSet::Feature(2, "client writeable ranges");
@@ -397,7 +398,7 @@ public:
   int remove_data_pool(int64_t poolid) {
     std::vector<int64_t>::iterator p = std::find(data_pools.begin(), data_pools.end(), poolid);
     if (p == data_pools.end())
-      return -CEPHFS_ENOENT;
+      return -ENOENT;
     data_pools.erase(p);
     return 0;
   }

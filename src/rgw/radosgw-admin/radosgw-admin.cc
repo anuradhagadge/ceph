@@ -1,9 +1,9 @@
-/*
- * Copyright (C) 2025 IBM 
-*/
-
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab ft=cpp
+
+/*
+ * Copyright (C) 2025 IBM 
+ */
 
 #include <cerrno>
 #include <string>
@@ -83,6 +83,8 @@ extern "C" {
 
 #include "driver/rados/rgw_bucket.h"
 #include "driver/rados/rgw_sal_rados.h"
+
+#include <iomanip>
 
 #define dout_context g_ceph_context
 
@@ -166,6 +168,7 @@ void usage()
   cout << "  bucket check unlinked            check for object versions that are not visible in a bucket listing \n";
   cout << "  bucket chown                     link bucket to specified user and update its object ACLs\n";
   cout << "  bucket reshard                   reshard bucket\n";
+  cout << "  bucket set-min-shards            set the minimum number of shards that dynamic resharding will consider for a bucket\n";
   cout << "  bucket rewrite                   rewrite all objects in the specified bucket\n";
   cout << "  bucket sync checkpoint           poll a bucket's sync status until it catches up to its remote\n";
   cout << "  bucket sync disable              disable bucket sync\n";
@@ -696,6 +699,7 @@ enum class OPT {
   BUCKET_RM,
   BUCKET_REWRITE,
   BUCKET_RESHARD,
+  BUCKET_SET_MIN_SHARDS,
   BUCKET_CHOWN,
   BUCKET_RADOS_LIST,
   BUCKET_SHARD_OBJECTS,
@@ -934,6 +938,7 @@ static SimpleCmd::Commands all_cmds = {
   { "bucket rm", OPT::BUCKET_RM },
   { "bucket rewrite", OPT::BUCKET_REWRITE },
   { "bucket reshard", OPT::BUCKET_RESHARD },
+  { "bucket set-min-shards", OPT::BUCKET_SET_MIN_SHARDS },
   { "bucket chown", OPT::BUCKET_CHOWN },
   { "bucket radoslist", OPT::BUCKET_RADOS_LIST },
   { "bucket rados list", OPT::BUCKET_RADOS_LIST },
@@ -3490,7 +3495,12 @@ int main(int argc, const char **argv)
     exit(0);
   }
 
-  auto cct = rgw_global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+  // alternative defaults for radosgw-admin
+  map<std::string,std::string> defaults = {
+    { "rgw_thread_pool_size", "8" },
+  };
+
+  auto cct = rgw_global_init(&defaults, args, CEPH_ENTITY_TYPE_CLIENT,
 			     CODE_ENVIRONMENT_UTILITY, 0);
   ceph::async::io_context_pool context_pool(cct->_conf->rgw_thread_pool_size);
 
@@ -7740,13 +7750,14 @@ int main(int argc, const char **argv)
       cerr << "ERROR: failed to get pending logging object name from target bucket '" << configuration.target_bucket << "'" << std::endl;
       return -ret;
     }
+    const auto old_obj = obj_name;
     ret = rgw::bucketlogging::rollover_logging_object(configuration, target_bucket, obj_name, dpp(), null_yield, true, &objv_tracker);
     if (ret < 0) {
-      cerr << "ERROR: failed to flush pending logging object '" << obj_name
+      cerr << "ERROR: failed to flush pending logging object '" << old_obj
         << "' to target bucket '" << configuration.target_bucket << "'" << std::endl;
       return -ret;
     }
-    cout << "flushed pending logging object '" << obj_name
+    cout << "flushed pending logging object '" << old_obj
       << "' to target bucket '" << configuration.target_bucket << "'" << std::endl;
     return 0;
   }
@@ -8799,6 +8810,51 @@ next:
     }
   } // OPT_RESHARD_CANCEL
 
+  if (opt_cmd == OPT::BUCKET_SET_MIN_SHARDS) {
+    if (bucket_name.empty()) {
+      cerr << "ERROR: bucket not specified" << std::endl;
+      return -EINVAL;
+    }
+
+    if (!num_shards_specified) {
+      cerr << "ERROR: --num-shards not specified" << std::endl;
+      return -EINVAL;
+    }
+
+    if (num_shards < 1) {
+      cerr << "ERROR: --num-shards must be at least 1" << std::endl;
+      return -EINVAL;
+    }
+
+    int ret = init_bucket(tenant, bucket_name, bucket_id, &bucket);
+    if (ret < 0) {
+      return -ret;
+    }
+    auto& bucket_info = bucket->get_info();
+
+    const rgw::BucketIndexType type =
+      bucket_info.layout.current_index.layout.type;
+    if (type != rgw::BucketIndexType::Normal) {
+      cerr << "ERROR: the bucket's layout is type " << type <<
+	" instead of type " << rgw::BucketIndexType::Normal <<
+	" and therefore does not have a "
+	"minimum number of shards that can be altered" << std::endl;
+      return EINVAL;
+    }
+
+    uint32_t& min_num_shards =
+      bucket_info.layout.current_index.layout.normal.min_num_shards;
+    min_num_shards = num_shards;
+
+    ret = bucket->put_info(dpp(), false, real_time(), null_yield);
+    if (ret < 0) {
+      cerr << "ERROR: failed writing bucket instance info: " << cpp_strerror(-ret) << std::endl;
+      return -ret;
+    }
+
+    return 0;
+  } // SET_MIN_SHARDS
+
   if (opt_cmd == OPT::OBJECT_UNLINK) {
     int ret = init_bucket(tenant, bucket_name, bucket_id, &bucket);
     if (ret < 0) {
@@ -8864,9 +8920,21 @@ next:
       } else if (iter->first == RGW_ATTR_SOURCE_ZONE) {
         handled = decode_dump<uint32_t>("source_zone", bl, formatter.get());
       } else if (iter->first == RGW_ATTR_RESTORE_EXPIRY_DATE) {
-        handled = decode_dump<utime_t>("restore_expiry_date", bl, formatter.get());
+        handled = decode_dump<ceph::real_time>("restore_expiry_date", bl, formatter.get());
       } else if (iter->first == RGW_ATTR_RESTORE_TIME) {
-        handled = decode_dump<utime_t>("restore_time", bl, formatter.get());
+        handled = decode_dump<ceph::real_time>("restore_time", bl, formatter.get());
+      } else if (iter->first == RGW_ATTR_RESTORE_TYPE) {
+        rgw::sal::RGWRestoreType rt;
+        decode(rt, bl);
+        formatter->dump_string("RestoreType", rgw::sal::rgw_restore_type_dump(rt));
+        handled = true;
+      } else if (iter->first == RGW_ATTR_RESTORE_STATUS) {
+        rgw::sal::RGWRestoreStatus rs;
+        decode(rs, bl);
+        formatter->dump_string("RestoreStatus", rgw::sal::rgw_restore_status_dump(rs));
+        handled = true;
+      } else if (iter->first == RGW_ATTR_TRANSITION_TIME) {
+        handled = decode_dump<utime_t>("transition_time", bl, formatter.get());
       }
 
       if (!handled)
@@ -8882,6 +8950,10 @@ next:
       bufferlist& bl = iter->second;
       if (iter->first == RGW_ATTR_OBJ_REPLICATION_TIMESTAMP) {
         decode_dump<ceph::real_time>("user.rgw.replicated-at", bl, formatter.get());
+      } else if (iter->first == RGW_ATTR_RESTORE_TIME) {
+        decode_dump<ceph::real_time>("user.rgw.restore-at", bl, formatter.get());
+      } else if (iter->first == RGW_ATTR_INTERNAL_MTIME) {
+        decode_dump<ceph::real_time>("user.rgw.rgw-internal-mtime", bl, formatter.get());
       } else {
         dump_string(iter->first.c_str(), iter->second, formatter.get());
       }
@@ -11884,6 +11956,7 @@ next:
       .max_groups = max_groups,
       .max_access_keys = max_access_keys,
       .max_buckets = max_buckets,
+      .purge_data = static_cast<bool>(purge_data),
     };
 
     std::string err_msg;

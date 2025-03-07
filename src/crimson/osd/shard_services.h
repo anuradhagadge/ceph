@@ -25,6 +25,7 @@
 #include "crimson/osd/state.h"
 #include "common/AsyncReserver.h"
 #include "crimson/net/Connection.h"
+#include "mgr/OSDPerfMetricTypes.h"
 
 namespace crimson::net {
   class Messenger;
@@ -197,6 +198,8 @@ class PerShardState {
   }
 
   OSDSuperblock per_shard_superblock;
+  std::list<OSDPerfMetricQuery> m_perf_queries;
+  std::map<OSDPerfMetricQuery, OSDPerfMetricLimits> m_perf_limits;
 
 public:
   PerShardState(
@@ -318,7 +321,7 @@ private:
   epoch_t up_thru_wanted = 0;
   seastar::future<> send_alive(epoch_t want);
 
-  const char** get_tracked_conf_keys() const final;
+  std::vector<std::string> get_tracked_keys() const noexcept final;
   void handle_conf_change(
     const ConfigProxy& conf,
     const std::set <std::string> &changed) final;

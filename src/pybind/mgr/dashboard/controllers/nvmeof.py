@@ -2,6 +2,7 @@
 import logging
 from typing import Any, Dict, Optional
 
+import cherrypy
 from orchestrator import OrchestratorError
 
 from .. import mgr
@@ -340,9 +341,19 @@ else:
                 "rbd_image_name": Param(str, "RBD image name"),
                 "create_image": Param(bool, "Create RBD image"),
                 "size": Param(int, "RBD image size"),
+                "rbd_image_size": Param(int, "RBD image size"),
+                "trash_image": Param(bool, "Trash the RBD image when namespace is removed"),
                 "block_size": Param(int, "NVMeoF namespace block size"),
                 "load_balancing_group": Param(int, "Load balancing group"),
                 "gw_group": Param(str, "NVMeoF gateway group", True, None),
+                "force": Param(
+                    bool,
+                    "Force create namespace even it image is used by other namespace"
+                ),
+                "no_auto_visible": Param(
+                    bool,
+                    "Namespace will be visible only for the allowed hosts"
+                )
             },
         )
         @NvmeofCLICommand("nvmeof ns add")
@@ -355,9 +366,13 @@ else:
             rbd_pool: str = "rbd",
             create_image: Optional[bool] = True,
             size: Optional[int] = 1024,
+            rbd_image_size: Optional[int] = None,
+            trash_image: Optional[bool] = False,
             block_size: int = 512,
             load_balancing_group: Optional[int] = None,
             gw_group: Optional[str] = None,
+            force: Optional[bool] = False,
+            no_auto_visible: Optional[bool] = False
         ):
             return NVMeoFClient(gw_group=gw_group).stub.namespace_add(
                 NVMeoFClient.pb2.namespace_add_req(
@@ -366,8 +381,11 @@ else:
                     rbd_pool_name=rbd_pool,
                     block_size=block_size,
                     create_image=create_image,
-                    size=size,
+                    size=rbd_image_size or size,
+                    trash_image=trash_image,
                     anagrpid=load_balancing_group,
+                    force=force,
+                    no_auto_visible=no_auto_visible
                 )
             )
 
@@ -383,10 +401,11 @@ else:
                 "r_mbytes_per_second": Param(int, "Read MB/s"),
                 "w_mbytes_per_second": Param(int, "Write MB/s"),
                 "gw_group": Param(str, "NVMeoF gateway group", True, None),
+                "trash_image": Param(bool, "Trash RBD image after removing namespace")
             },
         )
         @NvmeofCLICommand("nvmeof ns update")
-        @empty_response
+        @map_model(model.Namespace, first="namespaces")
         @handle_nvmeof_error
         def update(
             self,
@@ -398,36 +417,35 @@ else:
             rw_mbytes_per_second: Optional[int] = None,
             r_mbytes_per_second: Optional[int] = None,
             w_mbytes_per_second: Optional[int] = None,
-            gw_group: Optional[str] = None
+            gw_group: Optional[str] = None,
+            trash_image: Optional[bool] = None,
         ):
+            contains_failure = False
+
             if rbd_image_size:
                 mib = 1024 * 1024
                 new_size_mib = int((rbd_image_size + mib - 1) / mib)
 
-                response = NVMeoFClient(gw_group=gw_group).stub.namespace_resize(
+                resp = NVMeoFClient(gw_group=gw_group).stub.namespace_resize(
                     NVMeoFClient.pb2.namespace_resize_req(
                         subsystem_nqn=nqn, nsid=int(nsid), new_size=new_size_mib
                     )
                 )
-                if response.status != 0:
-                    return response
+                if resp.status != 0:
+                    contains_failure = True
 
             if load_balancing_group:
-                response = NVMeoFClient().stub.namespace_change_load_balancing_group(
+                resp = NVMeoFClient().stub.namespace_change_load_balancing_group(
                     NVMeoFClient.pb2.namespace_change_load_balancing_group_req(
                         subsystem_nqn=nqn, nsid=int(nsid), anagrpid=load_balancing_group
                     )
                 )
-                if response.status != 0:
-                    return response
+                if resp.status != 0:
+                    contains_failure = True
 
-            if (
-                rw_ios_per_second
-                or rw_mbytes_per_second
-                or r_mbytes_per_second
-                or w_mbytes_per_second
-            ):
-                response = NVMeoFClient().stub.namespace_set_qos_limits(
+            if rw_ios_per_second or rw_mbytes_per_second or r_mbytes_per_second \
+               or w_mbytes_per_second:
+                resp = NVMeoFClient().stub.namespace_set_qos_limits(
                     NVMeoFClient.pb2.namespace_set_qos_req(
                         subsystem_nqn=nqn,
                         nsid=int(nsid),
@@ -437,9 +455,26 @@ else:
                         w_mbytes_per_second=w_mbytes_per_second,
                     )
                 )
-                if response.status != 0:
-                    return response
+                if resp.status != 0:
+                    contains_failure = True
 
+            if trash_image is not None:
+                resp = NVMeoFClient().stub.namespace_set_rbd_trash_image(
+                    NVMeoFClient.pb2.namespace_set_rbd_trash_image_req(
+                        subsystem_nqn=nqn,
+                        nsid=int(nsid),
+                        trash_image=str_to_bool(trash_image)
+                    )
+                )
+                if resp.status != 0:
+                    contains_failure = True
+
+            if contains_failure:
+                cherrypy.response.status = 202
+
+            response = NVMeoFClient(gw_group=gw_group).stub.list_namespaces(
+                NVMeoFClient.pb2.list_namespaces_req(subsystem=nqn, nsid=int(nsid))
+            )
             return response
 
         @EndpointDoc(
@@ -448,14 +483,25 @@ else:
                 "nqn": Param(str, "NVMeoF subsystem NQN"),
                 "nsid": Param(str, "NVMeoF Namespace ID"),
                 "gw_group": Param(str, "NVMeoF gateway group", True, None),
+                "force": Param(str, "Force remove the RBD image")
             },
         )
         @NvmeofCLICommand("nvmeof ns del")
         @empty_response
         @handle_nvmeof_error
-        def delete(self, nqn: str, nsid: str, gw_group: Optional[str] = None):
+        def delete(
+            self,
+            nqn: str,
+            nsid: str,
+            gw_group: Optional[str] = None,
+            force: Optional[str] = "false"
+        ):
             return NVMeoFClient(gw_group=gw_group).stub.namespace_delete(
-                NVMeoFClient.pb2.namespace_delete_req(subsystem_nqn=nqn, nsid=int(nsid))
+                NVMeoFClient.pb2.namespace_delete_req(
+                    subsystem_nqn=nqn,
+                    nsid=int(nsid),
+                    i_am_sure=str_to_bool(force)
+                )
             )
 
     @APIRouter("/nvmeof/subsystem/{nqn}/host", Scope.NVME_OF)

@@ -6,6 +6,8 @@
 #include "crimson/common/log.h"
 #include "crimson/osd/osd_operations/client_request.h"
 
+using namespace std::string_literals;
+
 namespace {
   seastar::logger& logger() {
     return crimson::get_logger(ceph_subsys_osd);
@@ -178,6 +180,7 @@ seastar::future<> OperationThrottler::acquire_throttle(
   crimson::osd::scheduler::item_t item{params, seastar::promise<>()};
   auto fut = item.wake.get_future();
   scheduler->enqueue(std::move(item));
+  wake();
   return fut;
 }
 
@@ -198,13 +201,9 @@ void OperationThrottler::update_from_config(const ConfigProxy &conf)
   wake();
 }
 
-const char** OperationThrottler::get_tracked_conf_keys() const
+std::vector<std::string> OperationThrottler::get_tracked_keys() const noexcept
 {
-  static const char* KEYS[] = {
-    "crimson_osd_scheduler_concurrency",
-    NULL
-  };
-  return KEYS;
+  return {"crimson_osd_scheduler_concurrency"s};
 }
 
 void OperationThrottler::handle_conf_change(

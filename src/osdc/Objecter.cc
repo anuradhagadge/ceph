@@ -12,10 +12,12 @@
  *
  */
 
-#include <algorithm>
-#include <cerrno>
-
 #include "Objecter.h"
+#include "Striper.h"
+
+#include <algorithm>
+#include <sstream>
+
 #include "osd/OSDMap.h"
 #include "osd/error_code.h"
 #include "Filer.h"
@@ -90,6 +92,7 @@ using ceph::timespan;
 using ceph::shunique_lock;
 using ceph::acquire_shared;
 using ceph::acquire_unique;
+using namespace std::literals;
 
 namespace bc = boost::container;
 namespace bs = boost::system;
@@ -218,15 +221,13 @@ std::unique_lock<std::mutex> Objecter::OSDSession::get_lock(object_t& oid)
   return {completion_locks[h % num_locks], std::defer_lock};
 }
 
-const char** Objecter::get_tracked_conf_keys() const
+std::vector<std::string> Objecter::get_tracked_keys() const noexcept
 {
-  static const char *config_keys[] = {
-    "crush_location",
-    "rados_mon_op_timeout",
-    "rados_osd_op_timeout",
-    NULL
+  return {
+    "crush_location"s,
+    "rados_mon_op_timeout"s,
+    "rados_osd_op_timeout"s
   };
-  return config_keys;
 }
 
 
@@ -999,52 +1000,61 @@ void Objecter::_do_watch_notify(boost::intrusive_ptr<LingerOp> info,
   info->finished_async();
 }
 
-bool Objecter::ms_dispatch(Message *m)
+Dispatcher::dispatch_result_t Objecter::ms_dispatch2(const MessageRef &m)
 {
   ldout(cct, 10) << __func__ << " " << cct << " " << *m << dendl;
   switch (m->get_type()) {
     // these we exlusively handle
   case CEPH_MSG_OSD_OPREPLY:
-    handle_osd_op_reply(static_cast<MOSDOpReply*>(m));
-    return true;
+    m->get(); /* ref to be consumed */
+    handle_osd_op_reply(ref_cast<MOSDOpReply>(m).get());
+    return Dispatcher::HANDLED();
 
   case CEPH_MSG_OSD_BACKOFF:
-    handle_osd_backoff(static_cast<MOSDBackoff*>(m));
-    return true;
+    m->get(); /* ref to be consumed */
+    handle_osd_backoff(ref_cast<MOSDBackoff>(m).get());
+    return Dispatcher::HANDLED();
 
   case CEPH_MSG_WATCH_NOTIFY:
-    handle_watch_notify(static_cast<MWatchNotify*>(m));
-    m->put();
-    return true;
+    /* ref not consumed! */
+    handle_watch_notify(ref_cast<MWatchNotify>(m).get());
+    return Dispatcher::HANDLED();
 
   case MSG_COMMAND_REPLY:
     if (m->get_source().type() == CEPH_ENTITY_TYPE_OSD) {
-      handle_command_reply(static_cast<MCommandReply*>(m));
-      return true;
+      m->get(); /* ref to be consumed */
+      handle_command_reply(ref_cast<MCommandReply>(m).get());
+      return Dispatcher::HANDLED();
     } else {
-      return false;
+      return Dispatcher::UNHANDLED();
     }
 
   case MSG_GETPOOLSTATSREPLY:
-    handle_get_pool_stats_reply(static_cast<MGetPoolStatsReply*>(m));
-    return true;
+    m->get(); /* ref to be consumed */
+    handle_get_pool_stats_reply(ref_cast<MGetPoolStatsReply>(m).get());
+    return Dispatcher::HANDLED();
 
   case CEPH_MSG_POOLOP_REPLY:
-    handle_pool_op_reply(static_cast<MPoolOpReply*>(m));
-    return true;
+    m->get(); /* ref to be consumed */
+    handle_pool_op_reply(ref_cast<MPoolOpReply>(m).get());
+    return Dispatcher::HANDLED();
 
   case CEPH_MSG_STATFS_REPLY:
-    handle_fs_stats_reply(static_cast<MStatfsReply*>(m));
-    return true;
+    m->get(); /* ref to be consumed */
+    handle_fs_stats_reply(ref_cast<MStatfsReply>(m).get());
+    return Dispatcher::HANDLED();
 
     // these we give others a chance to inspect
 
     // MDS, OSD
   case CEPH_MSG_OSD_MAP:
-    handle_osd_map(static_cast<MOSDMap*>(m));
-    return false;
+    /* ref not consumed! */
+    handle_osd_map(ref_cast<MOSDMap>(m).get());
+    return Dispatcher::ACKNOWLEDGED();
+
+  default:
+    return Dispatcher::UNHANDLED();
   }
-  return false;
 }
 
 void Objecter::_scan_requests(

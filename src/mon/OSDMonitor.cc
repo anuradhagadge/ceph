@@ -678,16 +678,16 @@ void OSDMonitor::create_initial()
   if (newmap.nearfull_ratio > 1.0) newmap.nearfull_ratio /= 100;
 
   // new cluster should require latest by default
-  if (g_conf().get_val<bool>("mon_debug_no_require_squid")) {
-    if (g_conf().get_val<bool>("mon_debug_no_require_reef")) {
-      derr << __func__ << " mon_debug_no_require_squid and reef=true" << dendl;
-      newmap.require_osd_release = ceph_release_t::quincy;
-    } else {
-      derr << __func__ << " mon_debug_no_require_squid=true" << dendl;
+  if (g_conf().get_val<bool>("mon_debug_no_require_tentacle")) {
+    if (g_conf().get_val<bool>("mon_debug_no_require_squid")) {
+      derr << __func__ << " mon_debug_no_require_tentacle and squid=true" << dendl;
       newmap.require_osd_release = ceph_release_t::reef;
+    } else {
+      derr << __func__ << " mon_debug_no_require_tentacle=true" << dendl;
+      newmap.require_osd_release = ceph_release_t::squid;
     }
   } else {
-    newmap.require_osd_release = ceph_release_t::squid;
+    newmap.require_osd_release = ceph_release_t::tentacle;
   }
 
   ceph_release_t r = ceph_release_from_name(g_conf()->mon_osd_initial_require_min_compat_client);
@@ -3486,26 +3486,26 @@ bool OSDMonitor::preprocess_boot(MonOpRequestRef op)
   ceph_assert(m->get_orig_source_inst().name.is_osd());
 
   // lower bound of N-2
-  if (!HAVE_FEATURE(m->osd_features, SERVER_QUINCY)) {
+  if (!HAVE_FEATURE(m->osd_features, SERVER_REEF)) {
     mon.clog->info() << "disallowing boot of OSD "
 		     << m->get_orig_source_inst()
-		     << " because the osd lacks CEPH_FEATURE_SERVER_QUINCY";
+		     << " because the osd lacks CEPH_FEATURE_SERVER_REEF";
     goto ignore;
   }
 
   // make sure osd versions do not span more than 3 releases
-  if (HAVE_FEATURE(m->osd_features, SERVER_REEF) &&
-      osdmap.require_osd_release < ceph_release_t::pacific) {
-    mon.clog->info() << "disallowing boot of reef+ OSD "
-		      << m->get_orig_source_inst()
-		      << " because require_osd_release < pacific";
-    goto ignore;
-  }
   if (HAVE_FEATURE(m->osd_features, SERVER_SQUID) &&
       osdmap.require_osd_release < ceph_release_t::quincy) {
     mon.clog->info() << "disallowing boot of squid+ OSD "
 		      << m->get_orig_source_inst()
 		      << " because require_osd_release < quincy";
+    goto ignore;
+  }
+  if (HAVE_FEATURE(m->osd_features, SERVER_TENTACLE) &&
+      osdmap.require_osd_release < ceph_release_t::reef) {
+    mon.clog->info() << "disallowing boot of tentacle+ OSD "
+		      << m->get_orig_source_inst()
+		      << " because require_osd_release < reef";
     goto ignore;
   }
 
@@ -5224,9 +5224,7 @@ void OSDMonitor::tick()
   }
 
   // expire blocklisted items?
-  for (ceph::unordered_map<entity_addr_t,utime_t>::iterator p = osdmap.blocklist.begin();
-       p != osdmap.blocklist.end();
-       ++p) {
+  for (auto p = osdmap.blocklist.begin(); p != osdmap.blocklist.end(); ++p) {
     if (p->second < now) {
       dout(10) << "expiring blocklist item " << p->first << " expired " << p->second << " < now " << now << dendl;
       pending_inc.old_blocklist.push_back(p->first);
@@ -5992,9 +5990,7 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
     if (f)
       f->open_array_section("blocklist");
 
-    for (ceph::unordered_map<entity_addr_t,utime_t>::iterator p = osdmap.blocklist.begin();
-	 p != osdmap.blocklist.end();
-	 ++p) {
+    for (auto p = osdmap.blocklist.begin(); p != osdmap.blocklist.end(); ++p) {
       if (f) {
 	f->open_object_section("entry");
 	f->dump_string("addr", p->first.get_legacy_str());
@@ -11934,20 +11930,7 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       err = -EPERM;
       goto reply_no_propose;
     }
-    if (rel == ceph_release_t::quincy) {
-      if (!mon.monmap->get_required_features().contains_all(
-	    ceph::features::mon::FEATURE_QUINCY)) {
-	ss << "not all mons are quincy";
-	err = -EPERM;
-	goto reply_no_propose;
-      }
-      if ((!HAVE_FEATURE(osdmap.get_up_osd_features(), SERVER_QUINCY))
-           && !sure) {
-	ss << "not all up OSDs have CEPH_FEATURE_SERVER_QUINCY feature";
-	err = -EPERM;
-	goto reply_no_propose;
-      }
-    } else if (rel == ceph_release_t::reef) {
+    if (rel == ceph_release_t::reef) {
       if (!mon.monmap->get_required_features().contains_all(
 	    ceph::features::mon::FEATURE_REEF)) {
 	ss << "not all mons are reef";
@@ -11970,6 +11953,19 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       if ((!HAVE_FEATURE(osdmap.get_up_osd_features(), SERVER_SQUID))
            && !sure) {
 	ss << "not all up OSDs have CEPH_FEATURE_SERVER_SQUID feature";
+	err = -EPERM;
+	goto reply_no_propose;
+      }
+    } else if (rel == ceph_release_t::tentacle) {
+      if (!mon.monmap->get_required_features().contains_all(
+	    ceph::features::mon::FEATURE_TENTACLE)) {
+	ss << "not all mons are tentacle";
+	err = -EPERM;
+	goto reply_no_propose;
+      }
+      if ((!HAVE_FEATURE(osdmap.get_up_osd_features(), SERVER_TENTACLE))
+           && !sure) {
+	ss << "not all up OSDs have CEPH_FEATURE_SERVER_TENTACLE feature";
 	err = -EPERM;
 	goto reply_no_propose;
       }
@@ -15274,7 +15270,10 @@ bool OSDMonitor::check_for_dead_crush_zones(const map<string,set<string>>& dead_
   bool really_down = false;
   for (auto dbi : dead_buckets) {
     const string& bucket_name = dbi.first;
-    ceph_assert(osdmap.crush->name_exists(bucket_name));
+    if (!osdmap.crush->name_exists(bucket_name)) {
+      dout(10) << "CRUSH bucket " << bucket_name << " does not exist" << dendl;
+      continue;
+    }
     int bucket_id = osdmap.crush->get_item_id(bucket_name);
     dout(20) << "Checking " << bucket_name << " id " << bucket_id
 	     << " to see if OSDs are also down" << dendl;

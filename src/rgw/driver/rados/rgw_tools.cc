@@ -198,7 +198,7 @@ int rgw_delete_system_obj(const DoutPrefixProvider *dpp,
 }
 
 int rgw_rados_operate(const DoutPrefixProvider *dpp, librados::IoCtx& ioctx, const std::string& oid,
-                      librados::ObjectReadOperation *op, bufferlist* pbl,
+                      librados::ObjectReadOperation&& op, bufferlist* pbl,
                       optional_yield y, int flags, const jspan_context* trace_info,
                       version_t* pver)
 {
@@ -206,9 +206,10 @@ int rgw_rados_operate(const DoutPrefixProvider *dpp, librados::IoCtx& ioctx, con
   // of blocking
   if (y) {
     auto& yield = y.get_yield_context();
+    auto ex = yield.get_executor();
     boost::system::error_code ec;
-    auto [ver, bl] = librados::async_operate(
-      yield, ioctx, oid, op, flags, trace_info, yield[ec]);
+    auto [ver, bl] = librados::async_operate(ex, ioctx, oid, std::move(op),
+                                             flags, trace_info, yield[ec]);
     if (pbl) {
       *pbl = std::move(bl);
     }
@@ -218,7 +219,7 @@ int rgw_rados_operate(const DoutPrefixProvider *dpp, librados::IoCtx& ioctx, con
     return -ec.value();
   }
   maybe_warn_about_blocking(dpp);
-  int r = ioctx.operate(oid, op, nullptr, flags);
+  int r = ioctx.operate(oid, &op, nullptr, flags);
   if (pver) {
     *pver = ioctx.get_last_version();
   }
@@ -226,21 +227,22 @@ int rgw_rados_operate(const DoutPrefixProvider *dpp, librados::IoCtx& ioctx, con
 }
 
 int rgw_rados_operate(const DoutPrefixProvider *dpp, librados::IoCtx& ioctx, const std::string& oid,
-                      librados::ObjectWriteOperation *op, optional_yield y,
+                      librados::ObjectWriteOperation&& op, optional_yield y,
 		      int flags, const jspan_context* trace_info, version_t* pver)
 {
   if (y) {
     auto& yield = y.get_yield_context();
+    auto ex = yield.get_executor();
     boost::system::error_code ec;
-    version_t ver = librados::async_operate(yield, ioctx, oid, op, flags,
-                                            trace_info, yield[ec]);
+    version_t ver = librados::async_operate(ex, ioctx, oid, std::move(op),
+                                            flags, trace_info, yield[ec]);
     if (pver) {
       *pver = ver;
     }
     return -ec.value();
   }
   maybe_warn_about_blocking(dpp);
-  int r = ioctx.operate(oid, op, flags, trace_info);
+  int r = ioctx.operate(oid, &op, flags, trace_info);
   if (pver) {
     *pver = ioctx.get_last_version();
   }
@@ -254,8 +256,8 @@ int rgw_rados_notify(const DoutPrefixProvider *dpp, librados::IoCtx& ioctx, cons
   if (y) {
     auto& yield = y.get_yield_context();
     boost::system::error_code ec;
-    auto [ver, reply] = librados::async_notify(yield, ioctx, oid,
-                                               bl, timeout_ms, yield[ec]);
+    auto [ver, reply] = librados::async_notify(
+        yield.get_executor(), ioctx, oid, bl, timeout_ms, yield[ec]);
     if (pbl) {
       *pbl = std::move(reply);
     }

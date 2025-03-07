@@ -848,7 +848,7 @@
         {
           alert: 'NVMeoFSubsystemNamespaceLimit',
           'for': '1m',
-          expr: '(count by(nqn, cluster) (ceph_nvmeof_subsystem_namespace_metadata)) >= ceph_nvmeof_subsystem_namespace_limit',
+          expr: '(count by(nqn, cluster, instance) (ceph_nvmeof_subsystem_namespace_metadata)) >= on(nqn, instance) group_right(cluster) ceph_nvmeof_subsystem_namespace_limit',
           labels: { severity: 'warning', type: 'ceph_default' },
           annotations: {
             summary: '{{ $labels.nqn }} subsystem has reached its maximum number of namespaces%(cluster)s' % $.MultiClusterSummary(),
@@ -883,6 +883,16 @@
           annotations: {
             summary: 'Max gateways within a gateway group ({{ $labels.group }}) exceeded%(cluster)s' % $.MultiClusterSummary(),
             description: 'You may create many gateways in a gateway group, but %(NVMeoFMaxGatewaysPerGroup)d is the tested limit' % $._config,
+          },
+        },
+        {
+          alert: 'NVMeoFMaxGatewayGroups',
+          'for': '1m',
+          expr: 'count(count by (group, cluster) (ceph_nvmeof_gateway_info)) by (cluster) > %.2f' % [$._config.NVMeoFMaxGatewayGroups],
+          labels: { severity: 'warning', type: 'ceph_default' },
+          annotations: {
+            summary: 'Max gateway groups exceeded%(cluster)s' % $.MultiClusterSummary(),
+            description: 'You may create many gateway groups, but %(NVMeoFMaxGatewayGroups)d is the tested limit' % $._config,
           },
         },
         {

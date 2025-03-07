@@ -1114,7 +1114,7 @@ options:
   type: size
   level: advanced
   desc: Maximum amount of data to prefetch out of the socket receive buffer
-  default: 4_K
+  default: 64_K
   with_legacy: true
 - name: ms_initial_backoff
   type: float
@@ -2026,19 +2026,19 @@ options:
   see_also:
   - mon_debug_dump_transactions
   with_legacy: true
-- name: mon_debug_no_require_reef
+- name: mon_debug_no_require_squid
   type: bool
   level: dev
-  desc: do not set reef feature for new mon clusters
+  desc: do not set squid feature for new mon clusters
   default: false
   services:
   - mon
   flags:
   - cluster_create
-- name: mon_debug_no_require_squid
+- name: mon_debug_no_require_tentacle
   type: bool
   level: dev
-  desc: do not set squid feature for new mon clusters
+  desc: do not set tentacle feature for new mon clusters
   default: false
   services:
   - mon
@@ -2349,6 +2349,14 @@ options:
   type: float
   level: advanced
   default: 10
+  with_legacy: true
+- name: mon_client_hunt_on_resend
+  type: bool
+  level: advanced
+  default: true
+  fmt_desc: On commands connection failure, hunt for any monitor.
+    If false, try to resend the command to the same monitor to prevent
+    command race conditions.
   with_legacy: true
 - name: mon_client_max_log_entries_per_message
   type: int
@@ -4040,6 +4048,16 @@ options:
   level: advanced
   default: 16
   with_legacy: true
+- name: bdev_aio_submit_retry_max
+  type: int
+  level: advanced
+  default: 16
+  with_legacy: true
+- name: bdev_aio_submit_retry_initial_delay_us
+  type: int
+  level: advanced
+  default: 125
+  with_legacy: true
 - name: bdev_block_size
   type: size
   level: advanced
@@ -4114,6 +4132,23 @@ options:
   - runtime
   see_also:
   - bdev_enable_discard
+  - bdev_async_discard_max_pending
+- name: bdev_async_discard_max_pending
+  desc: maximum number of pending discards
+  long_desc: The maximum number of pending async discards that can be queued and not claimed by an
+    async discard thread. Discards will not be issued once the queue is full and blocks will be
+    freed back to the allocator immediately instead. This is useful if you have a device with slow
+    discard performance that can't keep up to a consistently high write workload. 0 means
+    'unlimited'.
+  type: uint
+  level: advanced
+  default: 1000000
+  min: 0
+  with_legacy: true
+  flags:
+  - runtime
+  see_also:
+  - bdev_async_discard_threads
 - name: bdev_flock_retry_interval
   type: float
   level: advanced
@@ -5482,6 +5517,29 @@ options:
   desc: Enable health indication when spurious read errors are observed by OSD
   default: true
   with_legacy: true
+- name: bluestore_warn_on_free_fragmentation
+  type: float
+  level: basic
+  desc: Level at which disk free fragmentation causes health warning. Set "1" to disable.
+    This is same value as admin command "bluestore allocator score block".
+  default: 0.8
+  with_legacy: false
+  flags:
+  - runtime
+  see_also:
+  - bluestore_fragmentation_check_period
+- name: bluestore_fragmentation_check_period
+  type: uint
+  level: basic
+  desc: The period to perform bluestore free fragmentation check.
+    Checking fragmentation is usually almost immediate. For highly fragmented storage,
+    it can take several miliseconds. It can cause a stall to a write operation.
+  default: 3600
+  with_legacy: false
+  flags:
+  - runtime
+  see_also:
+  - bluestore_warn_on_free_fragmentation
 - name: bluestore_slow_ops_warn_lifetime
   type: uint
   level: advanced

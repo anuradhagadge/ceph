@@ -295,9 +295,13 @@ int KernelDevice::open(const string& p)
     goto out_fail;
   }
 
-  r = _aio_start();
-  if (r < 0) {
-    goto out_fail;
+  if (size > 0) {
+    r = _aio_start();
+    if (r < 0) {
+      goto out_fail;
+    }
+  } else {
+    aio = false;
   }
 
   _discard_update_threads();
@@ -541,7 +545,20 @@ void KernelDevice::_aio_stop()
   if (aio) {
     dout(10) << __func__ << dendl;
     aio_stop = true;
+
+    IOContext wakeup_ctx(cct, nullptr, false);
+    bufferlist bl;
+    aio_read(0, block_size, &bl, &wakeup_ctx);
+    aio_submit(&wakeup_ctx);
+
     aio_thread.join();
+
+    if (cct->_conf->bdev_debug_aio) {
+      for (auto& i: wakeup_ctx.running_aios) {
+	debug_aio_unlink(i);
+      }
+    }
+
     aio_stop = false;
     io_queue->shutdown();
   }
@@ -604,6 +621,7 @@ void KernelDevice::discard_drain()
   dout(10) << __func__ << dendl;
   std::unique_lock l(discard_lock);
   while (!discard_queued.empty() || (discard_running > 0)) {
+    need_notify = true;
     discard_cond.wait(l);
   }
 }
@@ -769,7 +787,10 @@ void KernelDevice::_discard_thread(uint64_t tid)
       if (thr->stop)
 	break;
       dout(20) << __func__ << " sleep" << dendl;
-      discard_cond.notify_all(); // for the thread trying to drain...
+      if (need_notify) {
+        discard_cond.notify_all(); // for the thread trying to drain...
+        need_notify = false;
+      }
       discard_cond.wait(l);
       dout(20) << __func__ << " wake" << dendl;
     } else {
@@ -815,14 +836,21 @@ void KernelDevice::_discard_thread(uint64_t tid)
 
 // this is private and is expected that the caller checks that discard
 // threads are running via _discard_started()
-void KernelDevice::_queue_discard(interval_set<uint64_t> &to_release)
+bool KernelDevice::_queue_discard(interval_set<uint64_t> &to_release)
 {
   if (to_release.empty())
-    return;
+    return false;
+
+  auto max_pending = cct->_conf->bdev_async_discard_max_pending;
 
   std::lock_guard l(discard_lock);
+
+  if (max_pending > 0 && discard_queued.num_intervals() >= max_pending)
+    return false;
+
   discard_queued.insert(to_release);
   discard_cond.notify_one();
+  return true;
 }
 
 // return true only if discard was queued, so caller won't have to do
@@ -833,8 +861,7 @@ bool KernelDevice::try_discard(interval_set<uint64_t> &to_release, bool async)
     return false;
 
   if (async && _discard_started()) {
-    _queue_discard(to_release);
-    return true;
+    return _queue_discard(to_release);
   } else {
     for (auto p = to_release.begin(); p != to_release.end(); ++p) {
       _discard(p.get_start(), p.get_len());
@@ -944,9 +971,15 @@ void KernelDevice::aio_submit(IOContext *ioc)
   }
 
   void *priv = static_cast<void*>(ioc);
+  int retry_max = cct->_conf->bdev_aio_submit_retry_max;
+  int initial_delay_us = cct->_conf->bdev_aio_submit_retry_initial_delay_us;
+  dout(20) << __func__
+	   << " bdev_aio_submit_retry_max " << retry_max
+	   << " bdev_aio_submit_retry_initial_delay_us " << initial_delay_us
+	   << dendl;
   int r, retries = 0;
   r = io_queue->submit_batch(ioc->running_aios.begin(), e,
-			     priv, &retries);
+			     priv, &retries, retry_max, initial_delay_us);
 
   if (retries)
     derr << __func__ << " retries " << retries << dendl;

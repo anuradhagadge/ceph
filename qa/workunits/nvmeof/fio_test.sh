@@ -50,7 +50,8 @@ fi
 
 
 RUNTIME=${RUNTIME:-600}
-
+filename=$(echo "$selected_drives" | sed -z 's/\n/:\/dev\//g' | sed 's/:\/dev\/$//')
+filename="/dev/$filename"
 
 cat >> $fio_file <<EOF
 [nvmeof-fio-test]
@@ -61,11 +62,31 @@ size=${SIZE:-1G}
 time_based=1
 runtime=$RUNTIME
 rw=${RW:-randrw}
-filename=$(echo "$selected_drives" | tr '\n' ':' | sed 's/:$//')
+filename=${filename}
 verify=md5
 verify_fatal=1
 direct=1
 EOF
+
+status_log() {
+    POOL="${RBD_POOL:-mypool}"
+    GROUP="${NVMEOF_GROUP:-mygroup0}"
+    ceph -s
+    ceph orch host ls
+    ceph orch ls 
+    ceph orch ps
+    ceph health detail
+    ceph nvme-gw show $POOL $GROUP
+    sudo nvme list
+    sudo nvme list | wc -l
+    for device in $selected_drives; do
+        echo "Processing device: $device"
+        sudo nvme list-subsys /dev/$device
+        sudo nvme id-ns /dev/$device
+    done
+    
+}
+
 
 echo "[nvmeof.fio] starting fio test..."
 
@@ -78,7 +99,13 @@ if [ "$rbd_iostat" = true  ]; then
     timeout 20 rbd perf image iostat $RBD_POOL --iterations $iterations &
 fi
 fio --showcmd $fio_file
-sudo fio $fio_file 
-wait
+
+set +e 
+sudo fio $fio_file
+if [ $? -ne 0 ]; then
+    status_log
+    exit 1
+fi
+
 
 echo "[nvmeof.fio] fio test successful!"

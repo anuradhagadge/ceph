@@ -33,11 +33,15 @@ from prettytable import PrettyTable
 from ceph.cephadm.images import DefaultImages
 from ceph.deployment import inventory
 from ceph.deployment.drive_group import DriveGroupSpec
-from ceph.deployment.service_spec import \
-    ServiceSpec, PlacementSpec, \
-    HostPlacementSpec, IngressSpec, \
-    TunedProfileSpec, \
-    MgmtGatewaySpec
+from ceph.deployment.service_spec import (
+    ServiceSpec,
+    PlacementSpec,
+    HostPlacementSpec,
+    IngressSpec,
+    TunedProfileSpec,
+    MgmtGatewaySpec,
+    NvmeofServiceSpec,
+)
 from ceph.utils import str_to_datetime, datetime_to_str, datetime_now
 from cephadm.serve import CephadmServe
 from cephadm.services.cephadmservice import CephadmDaemonDeploySpec
@@ -1461,7 +1465,11 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         @forall_hosts
         def run(h: str) -> str:
             with self.async_timeout_handler(h, 'cephadm deploy (osd daemon)'):
-                return self.wait_async(self.osd_service.deploy_osd_daemons_for_existing_osds(h, 'osd'))
+                return self.wait_async(
+                    self.osd_service.deploy_osd_daemons_for_existing_osds(
+                        h, DriveGroupSpec(service_type='osd', service_id='')
+                    )
+                )
 
         return HandleCommandResult(stdout='\n'.join(run(host)))
 
@@ -1596,8 +1604,19 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
         self._kick_serve_loop()
         return HandleCommandResult()
 
-    def _get_container_image(self, daemon_name: str, use_current_daemon_image: bool = False) -> Optional[str]:
-        daemon_type = daemon_name.split('.', 1)[0]  # type: ignore
+    def get_container_image(
+        self,
+        daemon_name: str,
+        use_current_daemon_image: bool = False,
+        force_ceph_image: bool = False,
+    ) -> Optional[str]:
+        """Return an image for the given daemon_name.
+        If `use_current_daemon_image` is set the function will try to re-use
+        the image for an existing service.
+        If force_ceph_image is true the daemon_name will be ignored and the
+        main ceph container image will be returned.
+        """
+        daemon_type = daemon_name.split('.', 1)[0]
         image: Optional[str] = None
         # Try to use current image if specified. This is necessary
         # because, if we're reconfiguring the daemon, we can
@@ -1617,7 +1636,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule,
             except OrchestratorError:
                 self.log.debug(f'Could not find daemon {daemon_name} in cache '
                                'while searching for its image')
-        if daemon_type in CEPH_IMAGE_TYPES:
+        if daemon_type in CEPH_IMAGE_TYPES or force_ceph_image:
             # get container image
             image = str(self.get_foreign_ceph_option(
                 utils.name_to_config_section(daemon_name),
@@ -2328,6 +2347,7 @@ Then run the following:
                 virtual_ip=spec.get_virtual_ip(),
                 ports=spec.get_port_start(),
             )
+
             if spec.service_type == 'ingress':
                 # ingress has 2 daemons running per host
                 # but only if it's the full ingress service, not for keepalive-only
@@ -2544,7 +2564,7 @@ Then run the following:
             })
 
     @handle_orch_error
-    def daemon_action(self, action: str, daemon_name: str, image: Optional[str] = None) -> str:
+    def daemon_action(self, action: str, daemon_name: str, image: Optional[str] = None, force: bool = False) -> str:
         d = self.cache.get_daemon(daemon_name)
         assert d.daemon_type is not None
         assert d.daemon_id is not None
@@ -2553,6 +2573,12 @@ Then run the following:
                 and not self.mgr_service.mgr_map_has_standby():
             raise OrchestratorError(
                 f'Unable to schedule redeploy for {daemon_name}: No standby MGRs')
+
+        if action == 'restart' and not force:
+            r = service_registry.get_service(daemon_type_to_service(
+                d.daemon_type)).ok_to_stop([d.daemon_id], force=False)
+            if r.retval:
+                raise OrchestratorError(f'Unable to {action} daemon {d.name()}: {r.stderr} \nNote: Warnings can be bypassed with the --force flag')
 
         if action == 'rotate-key':
             if d.daemon_type not in ['mgr', 'osd', 'mds',
@@ -3390,6 +3416,26 @@ Then run the following:
             mgmt_gw_daemons = self.cache.get_daemons_by_service('mgmt-gateway')
             if not mgmt_gw_daemons:
                 raise OrchestratorError("The 'oauth2-proxy' service depends on the 'mgmt-gateway' service, but it is not configured.")
+
+        if spec.service_type == 'nvmeof':
+            nvmeof_spec = cast(NvmeofServiceSpec, spec)
+            assert nvmeof_spec.pool is not None, "Pool cannot be None for nvmeof services"
+            assert nvmeof_spec.service_id is not None  # for mypy
+            try:
+                self._check_pool_exists(nvmeof_spec.pool, nvmeof_spec.service_name())
+            except OrchestratorError as e:
+                self.log.debug(f"{e}")
+                raise
+            nvmeof_spec = cast(NvmeofServiceSpec, spec)
+            assert nvmeof_spec.service_id is not None  # for mypy
+            if nvmeof_spec.group and not nvmeof_spec.service_id.endswith(nvmeof_spec.group):
+                raise OrchestratorError("The 'nvmeof' service id/name must end with '.<nvmeof-group-name>'. Found "
+                                        f"group name '{nvmeof_spec.group}' and service id '{nvmeof_spec.service_id}'")
+            for sspec in [s.spec for s in self.spec_store.get_by_service_type('nvmeof')]:
+                nspec = cast(NvmeofServiceSpec, sspec)
+                if nvmeof_spec.group == nspec.group and nvmeof_spec.service_id != nspec.service_id:
+                    raise OrchestratorError(f"Cannot create nvmeof service with group {nvmeof_spec.group}. That group is already "
+                                            f"being used by the service {nspec.service_name()}")
 
         if spec.placement.count is not None:
             if spec.service_type in ['mon', 'mgr']:

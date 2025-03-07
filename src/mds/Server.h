@@ -15,35 +15,54 @@
 #ifndef CEPH_MDS_SERVER_H
 #define CEPH_MDS_SERVER_H
 
-#include <string_view>
-
-using namespace std::literals::string_view_literals;
+#include "mds/mdstypes.h" // for xattr_map
 
 #include <common/DecayCounter.h>
+#include "common/ref.h" // for cref_t
 
 #include "include/common_fwd.h"
-
-#include "messages/MClientReconnect.h"
-#include "messages/MClientReply.h"
-#include "messages/MClientRequest.h"
-#include "messages/MClientSession.h"
-#include "messages/MClientSnap.h"
-#include "messages/MClientReclaim.h"
-#include "messages/MClientReclaimReply.h"
-#include "messages/MLock.h"
+#include "include/Context.h" // for C_GatherBase
 
 #include "CInode.h"
-#include "MDSRank.h"
 #include "Mutation.h"
-#include "MDSContext.h"
+
+#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#include "crimson/common/perf_counters_collection.h"
+#else
+#include "common/perf_counters_collection.h"
+#endif
+
+#include <map>
+#include <memory>
+#include <set>
+#include <string_view>
+#include <vector>
+
+using namespace std::literals::string_view_literals;
 
 class OSDMap;
 class LogEvent;
 class EMetaBlob;
 class EUpdate;
+class LogSegment;
+class MDCache;
 class MDLog;
+class MDSContext;
+class MDSRank;
+class Session;
 struct SnapInfo;
+struct SnapRealm;
+class Message;
 class MetricsHandler;
+class MClientReconnect;
+class MClientReply;
+class MClientRequest;
+class MClientSession;
+class MClientSnap;
+class MClientReclaim;
+class MClientReclaimReply;
+class MLock;
+class MMDSPeerRequest;
 
 enum {
   l_mdss_first = 1000,
@@ -216,7 +235,8 @@ public:
   void handle_client_file_readlock(const MDRequestRef& mdr);
 
   bool xlock_policylock(const MDRequestRef& mdr, CInode *in,
-			bool want_layout=false, bool xlock_snaplock=false);
+			bool want_layout=false, bool xlock_snaplock=false,
+                        MutationImpl::LockOpVec lov={});
   CInode* try_get_auth_inode(const MDRequestRef& mdr, inodeno_t ino);
   void handle_client_setattr(const MDRequestRef& mdr);
   void handle_client_setlayout(const MDRequestRef& mdr);
@@ -243,6 +263,8 @@ public:
   
   // check layout
   bool is_valid_layout(file_layout_t *layout);
+
+  bool can_handle_charmap(const MDRequestRef& mdr, CDentry* dn);
 
   // open
   void handle_client_open(const MDRequestRef& mdr);
@@ -448,11 +470,15 @@ private:
            xattr_name == "ceph.dir.subvolume" ||
            xattr_name == "ceph.dir.pin" ||
            xattr_name == "ceph.dir.pin.random" ||
-           xattr_name == "ceph.dir.pin.distributed";
+           xattr_name == "ceph.dir.pin.distributed" ||
+           xattr_name == "ceph.dir.charmap"sv ||
+           xattr_name == "ceph.dir.normalization"sv ||
+           xattr_name == "ceph.dir.encoding"sv ||
+           xattr_name == "ceph.dir.casesensitive"sv;
   }
 
   static bool is_ceph_dir_vxattr(std::string_view xattr_name) {
-    return (xattr_name == "ceph.dir.layout" ||
+    return xattr_name == "ceph.dir.layout" ||
 	    xattr_name == "ceph.dir.layout.json" ||
 	    xattr_name == "ceph.dir.layout.object_size" ||
 	    xattr_name == "ceph.dir.layout.stripe_unit" ||
@@ -463,7 +489,11 @@ private:
 	    xattr_name == "ceph.dir.layout.pool_namespace" ||
 	    xattr_name == "ceph.dir.pin" ||
 	    xattr_name == "ceph.dir.pin.random" ||
-	    xattr_name == "ceph.dir.pin.distributed");
+	    xattr_name == "ceph.dir.pin.distributed" ||
+            xattr_name == "ceph.dir.charmap"sv ||
+            xattr_name == "ceph.dir.normalization"sv ||
+            xattr_name == "ceph.dir.encoding"sv ||
+            xattr_name == "ceph.dir.casesensitive"sv;
   }
 
   static bool is_ceph_file_vxattr(std::string_view xattr_name) {
@@ -527,7 +557,7 @@ private:
   MDLog *mdlog;
   PerfCounters *logger = nullptr;
 
-  // OSDMap full status, used to generate CEPHFS_ENOSPC on some operations
+  // OSDMap full status, used to generate ENOSPC on some operations
   bool is_full = false;
 
   // State for while in reconnect

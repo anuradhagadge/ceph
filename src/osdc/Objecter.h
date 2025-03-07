@@ -15,12 +15,10 @@
 #ifndef CEPH_OBJECTER_H
 #define CEPH_OBJECTER_H
 
-#include <condition_variable>
 #include <list>
 #include <map>
 #include <mutex>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -35,8 +33,6 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/io_context_strand.hpp>
 #include <boost/asio/post.hpp>
-
-#include <fmt/format.h>
 
 #include "include/buffer.h"
 #include "include/ceph_assert.h"
@@ -54,9 +50,11 @@
 #include "common/ceph_timer.h"
 #include "common/config_obs.h"
 #include "common/shunique_lock.h"
+#include "common/snap_types.h" // for class SnapContext
 #include "common/zipkin_trace.h"
 #include "common/tracer.h"
 #include "common/Throttle.h"
+#include "crush/crush.h" // for CRUSH_ITEM_NONE
 
 #include "mon/MonClient.h"
 
@@ -1692,7 +1690,7 @@ public:
   using OpCompletion = boost::asio::any_completion_handler<OpSignature>;
 
   // config observer bits
-  const char** get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set <std::string> &changed) override;
 
@@ -2732,7 +2730,8 @@ private:
 
   // messages
  public:
-  bool ms_dispatch(Message *m) override;
+  Dispatcher::dispatch_result_t ms_dispatch2(const MessageRef &m) override;
+
   bool ms_can_fast_dispatch_any() const override {
     return true;
   }
@@ -2745,10 +2744,8 @@ private:
       return false;
     }
   }
-  void ms_fast_dispatch(Message *m) override {
-    if (!ms_dispatch(m)) {
-      m->put();
-    }
+  void ms_fast_dispatch2(const MessageRef& m) override {
+    [[maybe_unused]] auto s = ms_dispatch2(m);
   }
 
   void handle_osd_op_reply(class MOSDOpReply *m);

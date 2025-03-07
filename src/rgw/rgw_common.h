@@ -125,6 +125,7 @@ using ceph::crypto::MD5;
 #define RGW_ATTR_RESTORE_TYPE   RGW_ATTR_PREFIX "restore-type"
 #define RGW_ATTR_RESTORE_TIME   RGW_ATTR_PREFIX "restored-at"
 #define RGW_ATTR_RESTORE_EXPIRY_DATE   RGW_ATTR_PREFIX "restore-expiry-date"
+#define RGW_ATTR_TRANSITION_TIME RGW_ATTR_PREFIX "transition-at"
 
 #define RGW_ATTR_TEMPURL_KEY1   RGW_ATTR_META_PREFIX "temp-url-key"
 #define RGW_ATTR_TEMPURL_KEY2   RGW_ATTR_META_PREFIX "temp-url-key-2"
@@ -189,6 +190,8 @@ using ceph::crypto::MD5;
 #define RGW_ATTR_TRACE RGW_ATTR_PREFIX "trace"
 
 #define RGW_ATTR_BUCKET_NOTIFICATION RGW_ATTR_PREFIX "bucket-notification"
+
+#define RGW_ATTR_INTERNAL_MTIME RGW_ATTR_PREFIX "rgw-internal-mtime"
 
 enum class RGWFormat : int8_t {
   BAD_FORMAT = -1,
@@ -1042,6 +1045,9 @@ class RGWSI_Zone;
 
 #include "rgw_cksum.h"
 
+
+// this represents the at-rest bucket instance object and is stored as
+// a system object
 struct RGWBucketInfo {
   rgw_bucket bucket;
   rgw_owner owner;

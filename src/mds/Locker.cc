@@ -12,19 +12,27 @@
  * 
  */
 
-
+#include "Locker.h"
+#include "MDCache.h"
 #include "CDir.h"
 #include "CDentry.h"
 #include "CInode.h"
 #include "common/config.h"
+#include "common/debug.h"
 #include "events/EOpen.h"
 #include "events/EUpdate.h"
-#include "Locker.h"
 #include "MDBalancer.h"
 #include "MDCache.h"
 #include "MDLog.h"
 #include "MDSRank.h"
 #include "MDSMap.h"
+#include "SimpleLock.h"
+#include "SnapRealm.h"
+#include "messages/MClientCaps.h"
+#include "messages/MClientCapRelease.h"
+#include "messages/MClientLease.h"
+#include "messages/MClientReply.h"
+#include "messages/MLock.h"
 #include "messages/MInodeFileCaps.h"
 #include "messages/MMDSPeerRequest.h"
 #include "Migrator.h"
@@ -4556,6 +4564,7 @@ void Locker::encode_lease(bufferlist& bl, const session_info_t& info,
 			  const LeaseStat& ls)
 {
   if (info.has_feature(CEPHFS_FEATURE_REPLY_ENCODING)) {
+    dout(25) << "encode lease reply encoding: " << ls << dendl;
     ENCODE_START(2, 1, bl);
     encode(ls.mask, bl);
     encode(ls.duration_ms, bl);
@@ -4564,6 +4573,7 @@ void Locker::encode_lease(bufferlist& bl, const session_info_t& info,
     ENCODE_FINISH(bl);
   }
   else {
+    dout(25) << "encode lease NO reply encoding: " << ls << dendl;
     encode(ls.mask, bl);
     encode(ls.duration_ms, bl);
     encode(ls.seq, bl);

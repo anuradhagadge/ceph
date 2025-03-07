@@ -1141,6 +1141,7 @@ class NFSServiceSpec(ServiceSpec):
                  config: Optional[Dict[str, str]] = None,
                  networks: Optional[List[str]] = None,
                  port: Optional[int] = None,
+                 monitoring_port: Optional[int] = None,
                  virtual_ip: Optional[str] = None,
                  enable_nlm: bool = False,
                  enable_haproxy_protocol: bool = False,
@@ -1157,6 +1158,7 @@ class NFSServiceSpec(ServiceSpec):
             extra_entrypoint_args=extra_entrypoint_args, custom_configs=custom_configs)
 
         self.port = port
+        self.monitoring_port = monitoring_port
         self.virtual_ip = virtual_ip
         self.enable_haproxy_protocol = enable_haproxy_protocol
         self.idmap_conf = idmap_conf
@@ -1288,15 +1290,29 @@ class RGWSpec(ServiceSpec):
         self.disable_multisite_sync_traffic = disable_multisite_sync_traffic
 
     def get_port_start(self) -> List[int]:
-        return [self.get_port()]
+        ports = self.get_port()
+        return ports
 
-    def get_port(self) -> int:
+    def get_port(self) -> List[int]:
+        ports = []
         if self.rgw_frontend_port:
-            return self.rgw_frontend_port
-        if self.ssl:
-            return 443
-        else:
-            return 80
+            ports.append(self.rgw_frontend_port)
+
+        ssl_port = next(
+            (
+                int(arg.split('=')[1])
+                for arg in (self.rgw_frontend_extra_args or [])
+                if arg.startswith("ssl_port=")
+            ),
+            None,
+        )
+
+        if self.ssl and ssl_port:
+            ports.append(ssl_port)
+        if not ports:
+            ports.append(443 if self.ssl else 80)
+
+        return ports
 
     def validate(self) -> None:
         super(RGWSpec, self).validate()
@@ -1386,6 +1402,7 @@ class NvmeofServiceSpec(ServiceSpec):
                  {"in_capsule_data_size": 8192, "max_io_qpairs_per_ctrlr": 7},
                  tgt_cmd_extra_args: Optional[str] = None,
                  iobuf_options: Optional[Dict[str, int]] = None,
+                 qos_timeslice_in_usecs: Optional[int] = 0,
                  discovery_addr: Optional[str] = None,
                  discovery_addr_map: Optional[Dict[str, str]] = None,
                  discovery_port: Optional[int] = None,
@@ -1526,6 +1543,8 @@ class NvmeofServiceSpec(ServiceSpec):
         self.tgt_cmd_extra_args = tgt_cmd_extra_args
         #: List of extra arguments for SPDK iobuf in the form opt=value
         self.iobuf_options: Optional[Dict[str, int]] = iobuf_options
+        #: ``qos_timeslice_in_usecs`` timeslice for QOS code, in micro seconds
+        self.qos_timeslice_in_usecs = qos_timeslice_in_usecs
         #: ``discovery_addr`` address of the discovery service
         self.discovery_addr = discovery_addr
         #: ``discovery_addr_map`` per node address map of the discovery service
@@ -1588,6 +1607,7 @@ class NvmeofServiceSpec(ServiceSpec):
         verify_positive_int(self.bdevs_per_cluster, "Bdevs per cluster")
         if self.bdevs_per_cluster is not None and self.bdevs_per_cluster < 1:
             raise SpecValidationError("Bdevs per cluster should be at least 1")
+        verify_non_negative_int(self.qos_timeslice_in_usecs, "QOS timeslice")
 
         verify_non_negative_number(self.spdk_ping_interval_in_seconds, "SPDK ping interval")
         if (
@@ -3027,7 +3047,7 @@ class SMBClusterPublicIPSpec:
 
 class SMBSpec(ServiceSpec):
     service_type = 'smb'
-    _valid_features = {'domain', 'clustered'}
+    _valid_features = {'domain', 'clustered', 'cephfs-proxy'}
     _default_cluster_meta_obj = 'cluster.meta.json'
     _default_cluster_lock_obj = 'cluster.meta.lock'
 
@@ -3158,6 +3178,13 @@ class SMBSpec(ServiceSpec):
         parts[-1] = objname
         uri = 'rados://' + '/'.join(parts)
         return uri
+
+    def get_port_start(self) -> List[int]:
+        ports = [445, 9922]  # SMB service runs on port 445 and smbmetrics uses 9922
+        if 'clustered' in self.features:
+            # ctdb uses port 4379
+            ports.append(4379)
+        return ports
 
     def strict_cluster_ip_specs(self) -> List[Dict[str, Any]]:
         return [s.to_strict() for s in (self.cluster_public_addrs or [])]

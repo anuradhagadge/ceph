@@ -131,7 +131,7 @@ class OSD final : public crimson::net::Dispatcher,
   seastar::timer<seastar::lowres_clock> stats_timer;
   std::vector<ShardServices::shard_stats_t> shard_stats;
 
-  const char** get_tracked_conf_keys() const final;
+  std::vector<std::string> get_tracked_keys() const noexcept final;
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set<std::string> &changed) final;
 
@@ -236,6 +236,8 @@ private:
 
   std::vector<DaemonHealthMetric> get_health_metrics();
 
+  seastar::future<> set_perf_queries(const ConfigPayload &config_payload);
+  seastar::future<MetricPayload> get_perf_reports();
 private:
   crimson::common::gate_per_shard gate;
 

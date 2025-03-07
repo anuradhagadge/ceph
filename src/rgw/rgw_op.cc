@@ -1036,7 +1036,7 @@ int handle_cloudtier_obj(req_state* s, const DoutPrefixProvider *dpp, rgw::sal::
       op_ret = get_system_versioning_params(s, &epoch, NULL);
       ldpp_dout(dpp, 20) << "getting versioning params tier placement handle cloud tier" << op_ret << dendl;
       if (op_ret < 0) {
-	ldpp_dout(dpp, 20) << "failed to get versioning params, op_ret = " << op_ret << dendl;
+        ldpp_dout(dpp, 20) << "failed to get versioning params, op_ret = " << op_ret << dendl;
         s->err.message = "failed to restore object";
         return op_ret;
       }
@@ -3193,6 +3193,13 @@ void RGWListBucket::execute(optional_yield y)
 {
   if (!s->bucket_exists) {
     op_ret = -ERR_NO_SUCH_BUCKET;
+    return;
+  }
+
+  if (const auto& current_index = s->bucket->get_info().layout.current_index;
+      current_index.layout.type == rgw::BucketIndexType::Indexless) {
+    s->err.message = "Indexless buckets cannot be listed";
+    op_ret = -ERR_METHOD_NOT_ALLOWED;
     return;
   }
 
@@ -6257,6 +6264,13 @@ void RGWPutACLs::execute(optional_yield y)
 
 void RGWPutLC::execute(optional_yield y)
 {
+  if (const auto& current_index = s->bucket->get_info().layout.current_index;
+      current_index.layout.type == rgw::BucketIndexType::Indexless) {
+    s->err.message = "Indexless buckets do not support lifecycle policy";
+    op_ret = -ERR_METHOD_NOT_ALLOWED;
+    return;
+  }
+
   bufferlist bl;
   
   RGWLifecycleConfiguration_S3 config(s->cct);
@@ -6604,7 +6618,8 @@ int RGWInitMultipart::verify_permission(optional_yield y)
   // add server-side encryption headers
   rgw_iam_add_crypt_attrs(s->env, s->info.crypt_attribute_map);
 
-  if (!verify_bucket_permission(this, s, rgw::IAM::s3PutObject)) {
+  if (!verify_bucket_permission(this, s, ARN(s->object->get_obj()),
+                                rgw::IAM::s3PutObject)) {
     return -EACCES;
   }
 
@@ -8651,8 +8666,9 @@ int RGWPutBucketObjectLock::verify_permission(optional_yield y)
 
 void RGWPutBucketObjectLock::execute(optional_yield y)
 {
-  if (!s->bucket->get_info().obj_lock_enabled()) {
-    s->err.message = "object lock configuration can't be set if bucket object lock not enabled";
+  if (!s->bucket->get_info().versioning_enabled()) {
+    s->err.message = "Object lock cannot be enabled unless the "
+        "bucket has versioning enabled";
     ldpp_dout(this, 4) << "ERROR: " << s->err.message << dendl;
     op_ret = -ERR_INVALID_BUCKET_STATE;
     return;
@@ -8695,6 +8711,17 @@ void RGWPutBucketObjectLock::execute(optional_yield y)
   }
 
   op_ret = retry_raced_bucket_write(this, s->bucket.get(), [this, y] {
+    if (!s->bucket->get_info().obj_lock_enabled()) {
+      // automatically enable object lock if the bucket is versioning-enabled
+      if (!s->bucket->get_info().versioning_enabled()) {
+        s->err.message = "Object lock cannot be enabled unless the "
+            "bucket has versioning enabled";
+        ldpp_dout(this, 4) << "ERROR: " << s->err.message << dendl;
+        return -ERR_INVALID_BUCKET_STATE;
+      }
+      s->bucket->get_info().flags |= BUCKET_OBJ_LOCK_ENABLED;
+    }
+
     s->bucket->get_info().obj_lock = obj_lock;
     op_ret = s->bucket->put_info(this, false, real_time(), y);
     return op_ret;

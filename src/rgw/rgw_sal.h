@@ -162,6 +162,7 @@ enum RGWRestoreStatus : uint8_t {
   RestoreFailed = 3
 };
 
+std::string_view rgw_restore_status_dump(rgw::sal::RGWRestoreStatus status);
 
 enum class RGWRestoreType : uint8_t {
   None = 0,
@@ -169,6 +170,7 @@ enum class RGWRestoreType : uint8_t {
   Permanent = 2
 };
 
+std::string_view rgw_restore_type_dump(rgw::sal::RGWRestoreType type);
 
 // a simple streaming data processing abstraction
 /**
@@ -684,7 +686,7 @@ class Driver {
 
     /** Register admin APIs unique to this driver */
     virtual void register_admin_apis(RGWRESTMgr* mgr) = 0;
-};
+}; // class Driver
 
 
 /// \brief Ref-counted callback object for User/Bucket read_stats_async().
@@ -887,6 +889,8 @@ class Bucket {
       std::optional<std::string> swift_ver_location;
       std::optional<RGWQuotaInfo> quota;
       std::optional<ceph::real_time> creation_time;
+      std::optional<rgw::BucketIndexType> index_type;
+      std::optional<uint32_t> index_shards;
     };
 
     /// Create this bucket in the backing store.
@@ -1219,7 +1223,8 @@ class Object {
     /** Get attributes for this object */
     virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp, rgw_obj* target_obj = NULL) = 0;
     /** Modify attributes for this object. */
-    virtual int modify_obj_attrs(const char* attr_name, bufferlist& attr_val, optional_yield y, const DoutPrefixProvider* dpp) = 0;
+    virtual int modify_obj_attrs(const char* attr_name, bufferlist& attr_val, optional_yield y, const DoutPrefixProvider* dpp,
+                                 uint32_t flags = rgw::sal::FLAG_LOG_OP) = 0;
     /** Delete attributes for this object */
     virtual int delete_obj_attrs(const DoutPrefixProvider* dpp, const char* attr_name, optional_yield y) = 0;
     /** Check to see if this object has expired */

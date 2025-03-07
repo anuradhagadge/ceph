@@ -28,6 +28,7 @@
 #include "common/convenience.h"
 #include "common/strtol.h"
 #include "include/str_list.h"
+#include "include/timegm.h"
 #include "rgw_crypt_sanitize.h"
 #include "rgw_bucket_sync.h"
 #include "rgw_sync_policy.h"
@@ -2115,7 +2116,8 @@ bool RGWUserCaps::is_valid_cap_type(const string& tp)
                                     "amz-cache",
                                     "oidc-provider",
                                     "user-info-without-keys",
-				                            "ratelimit"};
+                                    "ratelimit",
+                                    "accounts"};
 
   for (unsigned int i = 0; i < sizeof(cap_type) / sizeof(char *); ++i) {
     if (tp.compare(cap_type[i]) == 0) {

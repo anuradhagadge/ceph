@@ -12,7 +12,9 @@
  * 
  */
 
+#include "Monitor.h"
 
+#include <iomanip> // for std::setw()
 #include <iterator>
 #include <sstream>
 #include <tuple>
@@ -26,11 +28,11 @@
 #include "json_spirit/json_spirit_reader.h"
 #include "json_spirit/json_spirit_writer.h"
 
-#include "Monitor.h"
 #include "common/version.h"
 #include "common/blkdev.h"
 #include "common/cmdparse.h"
 #include "common/signal.h"
+#include "crush/CrushWrapper.h"
 
 #include "osd/OSDMap.h"
 
@@ -93,6 +95,12 @@
 #include "perfglue/heap_profiler.h"
 
 #include "auth/none/AuthNoneClientHandler.h"
+
+#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#include "crimson/common/perf_counters_collection.h"
+#else
+#include "common/perf_counters_collection.h"
+#endif
 
 #define dout_subsys ceph_subsys_mon
 #undef dout_prefix
@@ -536,6 +544,7 @@ CompatSet Monitor::get_supported_features()
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_QUINCY);
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_REEF);
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_SQUID);
+  compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_TENTACLE);
   return compat;
 }
 
@@ -2534,6 +2543,13 @@ void Monitor::apply_monmap_to_compatset_features()
     ceph_assert(HAVE_FEATURE(quorum_con_features, SERVER_SQUID));
     new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_SQUID);
   }
+  if (monmap_features.contains_all(ceph::features::mon::FEATURE_TENTACLE)) {
+    ceph_assert(ceph::features::mon::get_persistent().contains_all(
+           ceph::features::mon::FEATURE_TENTACLE));
+    // this feature should only ever be set if the quorum supports it.
+    ceph_assert(HAVE_FEATURE(quorum_con_features, SERVER_TENTACLE));
+    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_TENTACLE);
+  }
 
   dout(5) << __func__ << dendl;
   _apply_compatset_features(new_features);
@@ -2574,6 +2590,9 @@ void Monitor::calc_quorum_requirements()
   }
   if (features.incompat.contains(CEPH_MON_FEATURE_INCOMPAT_SQUID)) {
     required_features |= CEPH_FEATUREMASK_SERVER_SQUID;
+  }
+  if (features.incompat.contains(CEPH_MON_FEATURE_INCOMPAT_TENTACLE)) {
+    required_features |= CEPH_FEATUREMASK_SERVER_TENTACLE;
   }
 
   // monmap

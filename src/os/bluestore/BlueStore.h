@@ -26,6 +26,8 @@
 #include <ratio>
 #include <mutex>
 #include <queue>
+#include <shared_mutex> // for std::shared_lock
+#include <unordered_map>
 #include <condition_variable>
 
 #include <boost/intrusive/list.hpp>
@@ -34,13 +36,13 @@
 #include <boost/functional/hash.hpp>
 #include <boost/dynamic_bitset.hpp>
 #include <boost/circular_buffer.hpp>
+#include <boost/optional.hpp>
 #include <utility>
 
 #include "include/cpp-btree/btree_set.h"
 
 #include "include/ceph_assert.h"
 #include "include/interval_set.h"
-#include "include/unordered_map.h"
 #include "include/mempool.h"
 #include "include/hash.h"
 #include "common/bloom_filter.hpp"
@@ -237,13 +239,15 @@ enum {
 #define META_POOL_ID ((uint64_t)-1ull)
 using bptr_c_it_t = buffer::ptr::const_iterator;
 
+extern const std::vector<uint64_t> bdev_label_positions;
+
 class BlueStore : public ObjectStore,
 		  public md_config_obs_t {
   // -----------------------------------------------------
   // types
 public:
   // config observer
-  const char** get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
 			  const std::set<std::string> &changed) override;
 
@@ -1682,6 +1686,13 @@ public:
 
     //pool options
     pool_opts_t pool_opts;
+    std::optional<int> compression_algorithm;
+    std::optional<int> compression_mode;
+    std::optional<int> csum_type;
+    std::optional<int64_t> comp_min_blob_size;
+    std::optional<int64_t> comp_max_blob_size;
+    std::optional<double> compression_req_ratio;
+
     ContextQueue *commit_queue;
 
     OnodeCacheShard* get_onode_cache() const {
@@ -2494,7 +2505,8 @@ private:
 
   std::atomic<Compressor::CompressionMode> comp_mode =
     {Compressor::COMP_NONE}; ///< compression mode
-  CompressorRef compressor;
+  std::atomic<int> def_compressor_alg = {Compressor::COMP_ALG_NONE};
+  std::vector<CompressorRef> compressors;
   std::atomic<uint64_t> comp_min_blob_size = {0};
   std::atomic<uint64_t> comp_max_blob_size = {0};
 
@@ -2531,6 +2543,11 @@ private:
   bool bdev_label_multi = false;
   int64_t bdev_label_epoch = -1;
   bool bluestore_bdev_label_require_all = false;
+  uint64_t before_expansion_bdev_size = 0; // having non-zero indicates we need
+                                           // to expand allocator in NCB mode,
+                                           // perhaps could be removed when
+                                           // https://tracker.ceph.com/issues/70008
+                                           // is resolved.
 
   typedef std::map<uint64_t, volatile_statfs> osd_pools_map;
 
@@ -2770,6 +2787,8 @@ private:
   private:
     void _update_cache_settings();
     void _resize_shards(bool interval_stats);
+
+    mono_clock::time_point last_fragmentation_check;
   } mempool_thread;
 
 #ifdef WITH_BLKIN
@@ -2874,7 +2893,6 @@ private:
     std::vector<uint64_t>* out_valid_positions = nullptr,
     bool* out_is_multi = nullptr,
     int64_t* out_epoch = nullptr);
-  int _set_bdev_label_size(const std::string& path, uint64_t size);
   void _main_bdev_label_try_reserve();
   void _main_bdev_label_remove(Allocator* alloc);
 
@@ -3541,23 +3559,23 @@ public:
     _wctx_finish(&txc, c, o, &wctx, nullptr);
   }
 
-  static int debug_read_bdev_label(
-    CephContext* cct, BlockDevice* bdev, const std::string &path,
-    bluestore_bdev_label_t *label, uint64_t disk_position) {
-      return _read_bdev_label(cct, bdev, path, label, disk_position);
-    }
   static int debug_write_bdev_label(
     CephContext* cct, BlockDevice* bdev, const std::string &path,
     const bluestore_bdev_label_t& label, uint64_t disk_position) {
       return _write_bdev_label(cct, bdev, path, label,
         std::vector<uint64_t>({disk_position}));
     }
+  static int read_bdev_label_at_pos(
+    CephContext* cct,
+    const std::string &bdev_path,
+    uint64_t disk_position,
+    bluestore_bdev_label_t *label);
   static int read_bdev_label(
     CephContext* cct,
     const std::string &path,
     bluestore_bdev_label_t *out_label,
     std::vector<uint64_t>* out_valid_positions = nullptr,
-    bool* out_is_cloned = nullptr,
+    bool* out_is_multi = nullptr,
     int64_t* out_epoch = nullptr);
   static int write_bdev_label(
     CephContext* cct, const std::string &path,
@@ -3878,7 +3896,7 @@ private:
 	       CollectionRef& c,
 	       OnodeRef& o,
 	       const std::string& name,
-	       ceph::buffer::ptr& val);
+	       ceph::buffer::list& val);
   int _setattrs(TransContext *txc,
 		CollectionRef& c,
 		OnodeRef& o,

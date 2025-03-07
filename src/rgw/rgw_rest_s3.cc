@@ -501,7 +501,10 @@ int RGWGetObj_ObjStore_S3::send_response_data(bufferlist& bl, off_t bl_ofs,
       }
     }
 
-    if (checksum_mode) {
+    // omit the stored full-object checksum headers if a Range is requested
+    // TODO: detect when a Range coincides with a single part of a multipart
+    // upload, and return its part checksum?
+    if (checksum_mode && !range_str) {
       if (auto i = attrs.find(RGW_ATTR_CKSUM); i != attrs.end()) {
 	try {
 	  rgw::cksum::Cksum cksum;
@@ -1303,13 +1306,26 @@ struct ReplicationConfiguration {
         return -EINVAL;
       }
 
+      if (!std::holds_alternative<rgw_user>(s->owner.id)) {
+        // Currently, replication configuration is only supported for rgw_user
+        ldpp_dout(s, 1) << "NOTICE: replication configuration is only supported for rgw_user" << dendl;
+        return -ERR_NOT_IMPLEMENTED;
+      }
+
       pipe->id = id;
       pipe->params.priority = priority;
 
-      const auto& user_id = s->user->get_id();
+      // Here we are sure that s->owner.id is of type rgw_user
+      const auto& tenant_owner = std::get_if<rgw_user>(&s->owner.id)->tenant;
 
-      rgw_bucket_key dest_bk(user_id.tenant,
-                             destination.bucket);
+      auto dest_bk_arn = ARN::parse(destination.bucket);
+      if (!dest_bk_arn || dest_bk_arn->service != rgw::Service::s3 || dest_bk_arn->resource.empty()) {
+        s->err.message = "Invalid bucket ARN";
+        return -EINVAL;
+      }
+
+      rgw_bucket_key dest_bk(tenant_owner,
+                             dest_bk_arn->resource);
 
       if (source && !source->zone_names.empty()) {
         pipe->source.zones = get_zone_ids_from_names(driver, source->zone_names);
@@ -1331,7 +1347,7 @@ struct ReplicationConfiguration {
       }
       if (destination.acl_translation) {
         rgw_user u;
-        u.tenant = user_id.tenant;
+        u.tenant = tenant_owner;
         u.from_str(destination.acl_translation->owner); /* explicit tenant will override tenant,
                                                            otherwise will inherit it from s->user */
         pipe->params.dest.acl_translation.emplace();
@@ -1342,7 +1358,7 @@ struct ReplicationConfiguration {
       *enabled = (status == "Enabled");
 
       pipe->params.mode = rgw_sync_pipe_params::Mode::MODE_USER;
-      pipe->params.user = user_id.to_str();
+      pipe->params.user = to_string(s->owner.id);
 
       return 0;
     }
@@ -1376,7 +1392,7 @@ struct ReplicationConfiguration {
       }
 
       if (pipe.dest.bucket) {
-        destination.bucket = pipe.dest.bucket->get_key();
+        destination.bucket = ARN(*pipe.dest.bucket).to_string();
       }
 
       filter.emplace();
@@ -1880,7 +1896,7 @@ void RGWListBucket_ObjStore_S3::send_versioned_response()
       }
       s->formatter->dump_string("VersionId", version_id);
       s->formatter->dump_bool("IsLatest", iter->is_current());
-      dump_time(s, "LastModified", iter->meta.mtime);
+      dump_time_exact_seconds(s, "LastModified", iter->meta.mtime);
       if (!iter->is_delete_marker()) {
         s->formatter->dump_format("ETag", "\"%s\"", iter->meta.etag.c_str());
         s->formatter->dump_int("Size", iter->meta.accounted_size);
@@ -1973,7 +1989,7 @@ void RGWListBucket_ObjStore_S3::send_response()
 	s->formatter->open_object_section("dummy");
       }
       dump_urlsafe(s ,encode_key, "Key", key.name);
-      dump_time(s, "LastModified", iter->meta.mtime);
+      dump_time_exact_seconds(s, "LastModified", iter->meta.mtime);
       s->formatter->dump_format("ETag", "\"%s\"", iter->meta.etag.c_str());
       s->formatter->dump_int("Size", iter->meta.accounted_size);
       auto& storage_class = rgw_placement_rule::get_canonical_storage_class(iter->meta.storage_class);
@@ -2047,7 +2063,7 @@ void RGWListBucket_ObjStore_S3v2::send_versioned_response()
       }
       s->formatter->dump_string("VersionId", version_id);
       s->formatter->dump_bool("IsLatest", iter->is_current());
-      dump_time(s, "LastModified", iter->meta.mtime);
+      dump_time_exact_seconds(s, "LastModified", iter->meta.mtime);
       if (!iter->is_delete_marker()) {
         s->formatter->dump_format("ETag", "\"%s\"", iter->meta.etag.c_str());
         s->formatter->dump_int("Size", iter->meta.accounted_size);
@@ -2117,7 +2133,7 @@ void RGWListBucket_ObjStore_S3v2::send_response()
       rgw_obj_key key(iter->key);
       s->formatter->open_array_section("Contents");
       dump_urlsafe(s, encode_key, "Key", key.name);
-      dump_time(s, "LastModified", iter->meta.mtime);
+      dump_time_exact_seconds(s, "LastModified", iter->meta.mtime);
       s->formatter->dump_format("ETag", "\"%s\"", iter->meta.etag.c_str());
       s->formatter->dump_int("Size", iter->meta.accounted_size);
       auto& storage_class = rgw_placement_rule::get_canonical_storage_class(iter->meta.storage_class);
@@ -2478,35 +2494,39 @@ public:
   string location_constraint;
 };
 
-class RGWCreateBucketConfig : public XMLObj
-{
-public:
-  RGWCreateBucketConfig() {}
-  ~RGWCreateBucketConfig() override {}
+// BucketIndex
+struct RGWCreateBucketIndex : XMLObj {
+  XMLObj* type = nullptr;
+  XMLObj* num_shards = nullptr;
+
+  bool xml_end(const char*) override {
+    type = find_first("Type");
+    num_shards = find_first("NumShards");
+    return true;
+  }
 };
 
-class RGWCreateBucketParser : public RGWXMLParser
-{
-  XMLObj *alloc_obj(const char *el) override {
-    return new XMLObj;
-  }
+// CreateBucketConfiguration
+struct RGWCreateBucketConfig : XMLObj {
+  XMLObj* location_constraint = nullptr;
+  RGWCreateBucketIndex* index = nullptr;
 
-public:
-  RGWCreateBucketParser() {}
-  ~RGWCreateBucketParser() override {}
-
-  bool get_location_constraint(string& zone_group) {
-    XMLObj *config = find_first("CreateBucketConfiguration");
-    if (!config)
-      return false;
-
-    XMLObj *constraint = config->find_first("LocationConstraint");
-    if (!constraint)
-      return false;
-
-    zone_group = constraint->get_data();
-
+  bool xml_end(const char*) override {
+    location_constraint = find_first("LocationConstraint");
+    index = static_cast<RGWCreateBucketIndex*>(find_first("BucketIndex"));
     return true;
+  }
+};
+
+class RGWCreateBucketParser : public RGWXMLParser {
+  XMLObj *alloc_obj(const char *el) override {
+    using namespace std::string_view_literals;
+    if (el == "CreateBucketConfiguration"sv) {
+      return new RGWCreateBucketConfig;
+    } else if (el == "BucketIndex"sv) {
+      return new RGWCreateBucketIndex;
+    }
+    return new XMLObj;
   }
 };
 
@@ -2554,13 +2574,54 @@ int RGWCreateBucket_ObjStore_S3::get_params(optional_yield y)
       return -EINVAL;
     }
 
-    if (!parser.get_location_constraint(location_constraint)) {
-      ldpp_dout(this, 0) << "provided input did not specify location constraint correctly" << dendl;
+    auto config = static_cast<RGWCreateBucketConfig*>(
+        parser.find_first("CreateBucketConfiguration"));
+    if (!config) {
+      s->err.message = "Missing required element CreateBucketConfiguration";
       return -EINVAL;
     }
 
-    ldpp_dout(this, 10) << "create bucket location constraint: "
-		      << location_constraint << dendl;
+    if (config->location_constraint) {
+      location_constraint = config->location_constraint->get_data();
+
+      ldpp_dout(this, 10) << "create bucket location constraint: "
+          << location_constraint << dendl;
+    }
+
+    if (config->index) {
+      if (!config->index->type) {
+        s->err.message = "Missing required element Type in BucketIndex";
+        return -EINVAL;
+      }
+      rgw::BucketIndexType type;
+      if (!parse(config->index->type->get_data(), type)) {
+        s->err.message = "Unknown Type in BucketIndex";
+        return -EINVAL;
+      }
+      createparams.index_type = type;
+
+      if (config->index->num_shards) {
+        if (type != rgw::BucketIndexType::Normal) {
+          s->err.message = "NumShards requires Type to be Normal";
+          return -EINVAL;
+        }
+        auto val = ceph::parse<uint32_t>(config->index->num_shards->get_data());
+        if (!val) {
+          s->err.message = "Failed to parse integer NumShards in BucketIndex";
+          return -EINVAL;
+        }
+        if (*val == 0) {
+          s->err.message = "NumShards must be greater than 0";
+          return -EINVAL;
+        }
+        const auto limit = s->cct->_conf.get_val<uint64_t>("rgw_max_dynamic_shards");
+        if (*val > limit) {
+          s->err.message = fmt::format("NumShards cannot exceed {}", limit);
+          return -EINVAL;
+        }
+        createparams.index_shards = val;
+      }
+    }
   }
 
   size_t pos = location_constraint.find(':');
@@ -3757,7 +3818,7 @@ void RGWCopyObj_ObjStore_S3::send_response()
     send_partial_response(0);
 
   if (op_ret == 0) {
-    dump_time(s, "LastModified", mtime);
+    dump_time_exact_seconds(s, "LastModified", mtime);
     if (!etag.empty()) {
       s->formatter->dump_format("ETag", "\"%s\"",etag.c_str());
     }
@@ -4531,7 +4592,7 @@ void RGWListMultipart_ObjStore_S3::send_response()
       rgw::sal::MultipartPart* part = iter->second.get();
       s->formatter->open_object_section("Part");
 
-      dump_time(s, "LastModified", part->get_mtime());
+      dump_time_exact_seconds(s, "LastModified", part->get_mtime());
 
       s->formatter->dump_unsigned("PartNumber", part->get_num());
       s->formatter->dump_format("ETag", "\"%s\"", part->get_etag().c_str());
